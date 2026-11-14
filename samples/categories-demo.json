@@ -1,0 +1,8 @@
+{
+  "format": "research-hunter-categories",
+  "version": 2,
+  "categories": [
+    {"id":"demo-research","title":"البحث العلمي","description":"مثال لدمج عبارات جديدة مع تصنيف موجود","symbol":"ع","language":"ar","terms":["البحث العلمي","إدارة المراجع","أخلاقيات البحث"]},
+    {"id":"demo-methods","title":"Research methods","description":"مثال لتصنيف إنجليزي","symbol":"EN","language":"en","terms":["qualitative research","quantitative research","mixed methods"]}
+  ]
+}
