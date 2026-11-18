@@ -6,15 +6,19 @@
   const langLabel = lang => ({ ar: 'العربية', en: 'الإنجليزية', both: 'لغتان', mixed: 'لغتان' }[lang] || 'غير محددة');
   const storage = new C.StorageManager({ getItem: k => window.localStorage.getItem(k), setItem: (k, v) => window.localStorage.setItem(k, v) });
   const seed = window.HunterDefaults;
-  const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null });
+  const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: [] });
   const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, stagedFiles = [], importResult = null, importBusy = false;
   const xTab = new C.XTab(window.open.bind(window));
+  let researchUI = null;
+  let lastValidOptions = C.normalizeOptions(state.options);
   function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
   function warn(message) { $('storageWarning').textContent = message; $('storageWarning').hidden = !message; }
   function saveNow() {
     clearTimeout(saveTimer);
     if (writeBlocked) { $('saveStatus').classList.add('failed'); $('saveStatus').lastElementChild.textContent = 'الحفظ متوقف · نزّل نسخة'; return false; }
-    const result = storage.save(state); $('saveStatus').classList.toggle('failed', !result.ok); $('saveStatus').lastElementChild.textContent = result.ok ? 'محفوظ على الجهاز' : 'لم يُحفظ · نزّل نسخة';
+    let snapshot = state;
+    try { lastValidOptions = C.normalizeOptions(state.options); } catch { snapshot = { ...state, options: lastValidOptions }; }
+    const result = storage.save(snapshot); $('saveStatus').classList.toggle('failed', !result.ok); $('saveStatus').lastElementChild.textContent = result.ok ? snapshot === state ? 'محفوظ على الجهاز' : 'المكتبة محفوظة · راجع المرشحات' : 'لم يُحفظ · نزّل نسخة';
     if (!result.ok) warn(result.warning); return result.ok;
   }
   function scheduleSave() { clearTimeout(saveTimer); $('saveStatus').lastElementChild.textContent = writeBlocked ? 'الحفظ متوقف' : 'جارٍ الحفظ…'; saveTimer = setTimeout(saveNow, 450); }
@@ -26,7 +30,7 @@
   const dateStamp = () => new Date().toISOString().slice(0, 10);
   function exportBackup() { try { saveNow(); download(C.backupArchive(state), `research-hunter-web-backup-${dateStamp()}.json`); toast('أُعدّت نسخة Web كاملة للتنزيل.'); } catch (e) { toast(e.message); } }
   function exportCategories() {
-    try { const archive = C.categoryArchive(state.categories, state.exportSelected); download(archive, 'research-hunter-categories.json'); toast(`أُعدّ ملف يضم ${archive.categories.length} تصنيفًا محددًا للتصدير.`); }
+    try { const archive = C.categoryArchive(state.categories, state.exportSelected); download(archive, 'research-hunter-categories.json'); toast(`أُعدّ ${archive.categories.length} تصنيفًا بعباراته الفعّالة للإضافة. استخدم تصدير Web لحفظ المراجعات والقوالب.`); }
     catch (e) { toast(e.message); if (!state.exportSelected.length) { location.hash = 'library'; route(); $('selectAllForExport').focus(); } }
   }
   async function copy(text) {
@@ -43,7 +47,7 @@
   }
   function renderOverview() {
     $('statCategories').textContent = state.categories.length; $('navCount').textContent = state.categories.length;
-    $('statTerms').textContent = C.unique(state.categories.flatMap(c => c.terms)).length;
+    $('statTerms').textContent = C.unique(state.categories.flatMap(C.activeTerms)).length;
     $('selectedCount').textContent = state.selected.length + ' محدد';
   }
   function filteredCategories(filter) { const k = C.key(filter); return state.categories.filter(c => C.key([c.title, c.description, ...c.terms].join(' ')).includes(k)); }
@@ -52,18 +56,18 @@
     for (const c of visible) {
       const selected = state.selected.includes(c.id), label = node('label', 'category-choice' + (selected ? ' selected' : '')), head = node('div', 'choice-head'), check = node('input'); check.type = 'checkbox'; check.checked = selected; check.setAttribute('aria-label', c.title); check.dataset.categoryId = c.id;
       head.append(node('span', 'category-symbol', c.symbol), check); const title = node('strong', '', c.title); title.dir = 'auto'; const desc = node('span', 'description', c.description); desc.dir = 'auto';
-      const meta = node('span', 'choice-meta'), count = node('span'); count.append(node('i'), document.createTextNode(c.terms.length + ' عبارة')); meta.append(count, node('span', '', langLabel(c.language))); label.append(head, title, desc, meta);
+      const meta = node('span', 'choice-meta'), count = node('span'); count.append(node('i'), document.createTextNode(C.activeTerms(c).length + ' عبارة فعّالة')); meta.append(count, node('span', '', langLabel(c.language))); label.append(head, title, desc, meta);
       check.addEventListener('change', () => { state.selected = check.checked ? [...state.selected, c.id] : state.selected.filter(x => x !== c.id); label.classList.toggle('selected', check.checked); renderOverview(); renderPlan(); scheduleSave(); }); list.append(label);
     }
     if (!visible.length) { const empty = node('div', 'empty-state'); empty.append(node('h3', '', state.categories.length ? 'لم نجد تصنيفًا بهذا البحث' : 'ابدأ مكتبتك الأولى'), node('p', '', state.categories.length ? 'جرّب اسمًا أو عبارة أخرى.' : 'أضف تصنيفًا أو استورد ملف JSON من مكتبة التصنيفات.')); list.append(empty); }
   }
-  const searchFields = { resultType: 'type', searchLanguage: 'language', batchSize: 'batchSize', since: 'since', until: 'until', account: 'account', searchExclude: 'exclude', noReplies: 'noReplies', noReposts: 'noReposts' };
-  function syncSearchFields() { for (const [field, name] of Object.entries(searchFields)) { if ($(field).type === 'checkbox') $(field).checked = state.options[name]; else $(field).value = state.options[name]; } $('extraTerms').value = state.extra; }
+  const searchFields = { resultType: 'type', searchLanguage: 'language', batchSize: 'batchSize', since: 'since', until: 'until', account: 'accounts', searchExclude: 'exclude', requiredTerms: 'required', matchMode: 'match', noReplies: 'noReplies', noReposts: 'noReposts' };
+  function syncSearchFields() { for (const [field, name] of Object.entries(searchFields)) { if ($(field).type === 'checkbox') $(field).checked = state.options[name]; else $(field).value = Array.isArray(state.options[name]) ? state.options[name].join(', ') : state.options[name]; } $('extraTerms').value = state.extra; }
   function planned() { const collected = C.collectTerms(state.categories, state.selected, state.extra); return { ...C.buildPlan(collected.terms, state.options), duplicates: collected.duplicates }; }
   function renderPlan() {
     try { const plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
     catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
-    $('startSearch').querySelector('span').textContent = state.session ? 'بدء جولة جديدة في X' : 'بدء البحث في X'; renderSession();
+    $('startSearch').querySelector('span').textContent = state.session ? 'بدء جولة جديدة في X' : 'بدء البحث في X'; renderSession(); researchUI?.refresh();
   }
   function renderSession() {
     const session = state.session; $('activeSession').hidden = !session;
@@ -84,16 +88,18 @@
   function renderLibrary() {
     const list = $('libraryList'); list.replaceChildren();
     for (const c of filteredCategories($('libraryFilter').value)) {
-      const card = node('article', 'library-item' + (state.exportSelected.includes(c.id) ? ' export-selected' : '')), head = node('div', 'library-item-head'); head.append(node('span', 'category-symbol', c.symbol), node('span', '', c.terms.length + ' عبارة · ' + langLabel(c.language)));
+      const card = node('article', 'library-item' + (state.exportSelected.includes(c.id) ? ' export-selected' : '')), head = node('div', 'library-item-head'); head.append(node('span', 'category-symbol', c.symbol), node('span', '', C.activeTerms(c).length + ' فعّالة · ' + langLabel(c.language)));
       const title = node('h3', '', c.title); title.dir = 'auto'; const description = node('p', '', c.description); description.dir = 'auto'; const terms = node('div', 'preview-terms');
       terms.append(...c.terms.slice(0, 3).map(t => node('bdi', 'term-chip', t))); if (c.terms.length > 3) terms.append(node('span', '', '+' + (c.terms.length - 3)));
-      const actions = node('div', 'library-item-actions'), edit = node('button', 'text-button', 'تحرير'), search = node('button', 'text-button', 'للبحث'), del = node('button', 'text-button', 'حذف');
+      const actions = node('div', 'library-item-actions'), edit = node('button', 'text-button', 'تحرير'), search = node('button', 'text-button', 'للبحث'), del = node('button', 'text-button', 'حذف'), review = node('button', 'text-button', 'مراجعة'), preset = node('button', 'text-button', c.preset ? 'القالب ✓' : 'قالب بحث');
+      review.setAttribute('aria-label', 'مراجعة ' + c.title); preset.setAttribute('aria-label', 'قالب بحث ' + c.title); review.addEventListener('click', () => researchUI.review(c.id)); preset.addEventListener('click', () => researchUI.preset(c.id));
+      const report = C.qualityReport(c), quality = node('div', 'library-quality', `${report.reviewed} راجعتُها · ${report.excluded} مستبعدة${report.alerts.length ? ` · ${report.alerts.length} تنبيهات صياغة` : ''}`);
       const exportChoice = node('label', 'library-export-choice'), check = node('input'); check.type = 'checkbox'; check.checked = state.exportSelected.includes(c.id); check.setAttribute('aria-label', 'تصدير ' + c.title); exportChoice.append(check, node('span', '', 'اختيار للتصدير'));
       check.addEventListener('change', () => { state.exportSelected = check.checked ? [...new Set([...state.exportSelected, c.id])] : state.exportSelected.filter(id => id !== c.id); card.classList.toggle('export-selected', check.checked); renderExportSelection(); scheduleSave(); });
       edit.setAttribute('aria-label', 'تحرير ' + c.title); del.setAttribute('aria-label', 'حذف ' + c.title); search.setAttribute('aria-label', 'البحث بتصنيف ' + c.title);
       edit.addEventListener('click', () => editCategory(c.id)); search.addEventListener('click', () => { if (!state.selected.includes(c.id)) state.selected.push(c.id); changed('أُضيف التصنيف إلى اختيارات البحث.'); location.hash = 'search'; });
       del.addEventListener('click', () => confirmAction('حذف التصنيف', `سيُحذف «${c.title}» من المكتبة المحلية. يمكنك تنزيل نسخة احتياطية قبل الحذف من الشريط العلوي.`, () => { state.categories = state.categories.filter(x => x.id !== c.id); state.selected = state.selected.filter(x => x !== c.id); state.exportSelected = state.exportSelected.filter(x => x !== c.id); changed('حُذف التصنيف.'); }));
-      actions.append(edit, search, del); card.append(head, title, description, terms, exportChoice, actions); list.append(card);
+      actions.append(review, edit, preset, search, del); card.append(head, title, description, terms, quality, exportChoice, actions); list.append(card);
     }
     if (!list.children.length) { const empty = node('div', 'empty-state'); empty.append(node('h3', '', state.categories.length ? 'لا توجد نتائج مطابقة' : 'مكتبتك جاهزة لبداية جديدة'), node('p', '', 'أضف تصنيفًا جديدًا أو استورد ملفاتك السابقة.')); list.append(empty); }
     $('librarySummary').textContent = `${state.categories.length} تصنيفًا · ${state.categories.reduce((s, c) => s + c.terms.length, 0)} عبارة في المكتبة`;
@@ -115,7 +121,7 @@
     e.preventDefault(); try {
       const original = state.categories.find(c => c.id === editingId), raw = $('editTerms').value;
       const terms = original && raw === original.terms.join('\n') ? original.terms : C.parseTerms(raw);
-      const c = C.validateCategory({ id: editingId || C.id(), title: $('editTitle').value, description: $('editDescription').value.trim() || $('editTitle').value.trim(), language: $('editLanguage').value, symbol: $('editSymbol').value || 'ع', terms });
+      const c = C.validateCategory({ ...original, id: editingId || C.id(), title: $('editTitle').value, description: $('editDescription').value.trim() || $('editTitle').value.trim(), language: $('editLanguage').value, symbol: $('editSymbol').value || 'ع', terms });
       const categories = editingId ? state.categories.map(x => x.id === editingId ? c : x) : [...state.categories, c]; state.categories = C.validateCategories(categories); closeDialog('categoryDialog'); changed('أُضيف التصنيف أو حُفظ تعديله.');
     } catch (error) { $('categoryFormError').textContent = error.message; $('categoryFormError').hidden = false; }
   });
@@ -133,18 +139,27 @@
     }
     groupSummary();
   }
-  function groupSummary() { let total = 0, included = 0; for (const s of C.SECTIONS) { const g = state.draft.groups[s.key], terms = C.parseTerms(g.terms); $('groupCount_' + s.key).textContent = terms.length + ' عبارة'; if (g.include && terms.length) { total += terms.length; included++; } } $('generatedSummary').textContent = `${included} مجموعات محددة · ${total} عبارة`; }
-  function syncDraft() { for (const input of document.querySelectorAll('[data-draft]')) input.value = state.draft[input.dataset.draft]; renderGroups(); }
+  function groupSummary() { let total = 0, included = 0, alerts = 0; for (const s of C.SECTIONS) { const g = state.draft.groups[s.key], terms = C.parseTerms(g.terms); const bad = terms.filter(t => C.inspectTerm(t).length).length; $('groupCount_' + s.key).textContent = terms.length + ' عبارة' + (bad ? ` · ${bad} تنبيه` : ''); if (g.include && terms.length) { total += terms.length; included++; alerts += bad; } } $('generatedSummary').textContent = `${included} مجموعات محددة · ${total} عبارة${alerts ? ` · ${alerts} تحتاج فحص الصياغة` : ''}`; }
+  function syncDraft() { for (const input of document.querySelectorAll('[data-draft]')) input.value = state.draft[input.dataset.draft]; $('topic').dataset.previous = state.draft.topic; renderGroups(); researchUI?.renderDraftEvidence(); }
   function generatedCategories() {
     const categories = [];
     for (const s of C.SECTIONS) {
       const g = state.draft.groups[s.key], terms = C.parseTerms(g.terms); if (!g.include || !terms.length) continue;
       if (terms.some(t => s.hashtag ? !C.validHashtag(t) : t.startsWith('#'))) throw Error(`راجع مجموعة «${s.label}»: توجد عبارة في غير موضعها أو هاشتاق غير صالح.`);
-      categories.push(C.validateCategory({ id: C.id(), title: g.title, description: g.description.trim() || g.title, symbol: s.symbol, language: s.language, terms }));
+      const draft = state.draft, usePreset = draft.selectedAccounts.length || draft.useExclusions && draft.exclusions.length;
+      categories.push(C.validateCategory({ id: C.id(), title: g.title, description: g.description.trim() || g.title, symbol: s.symbol, language: s.language, terms, reviews: C.normalizeReviews(draft.evidence, terms), accountSources: draft.accounts.filter(a => draft.selectedAccounts.includes(a.handle)), ...(usePreset ? { preset: C.normalizeOptions({ accounts: draft.selectedAccounts, exclude: draft.useExclusions ? draft.exclusions.join('\n') : '' }) } : {}) }));
     }
     if (!categories.length) throw Error('أدخل عبارات في مجموعة واحدة على الأقل، واختر تضمينها.'); return categories;
   }
-  function saveGenerated(goSearch) { try { const incoming = generatedCategories(), result = C.mergeCategories(state.categories, incoming); state.categories = result.categories; if (goSearch) { state.selected = incoming.map(c => state.categories.find(x => C.key(x.title) === C.key(c.title) && (!x.language || x.language === c.language))?.id).filter(Boolean); state.extra = ''; syncSearchFields(); } changed(`أُضيفت المجموعات إلى المكتبة${result.merged ? ' مع دمج المتشابه' : ''}.`); if (goSearch) location.hash = 'search'; } catch (e) { toast(e.message); } }
+  function saveGenerated(goSearch, goReview = false) {
+    try {
+      const incoming = generatedCategories(), result = C.mergeCategories(state.categories, incoming); state.categories = result.categories;
+      const ids = incoming.map(c => state.categories.find(x => C.key(x.title) === C.key(c.title) && (!x.language || x.language === c.language))?.id).filter(Boolean);
+      if (goSearch) { state.selected = ids; state.extra = ''; state.options = C.normalizeOptions({ batchSize: state.options.batchSize, accounts: state.draft.selectedAccounts, exclude: state.draft.useExclusions ? state.draft.exclusions.join('\n') : '', language: state.draft.language === 'both' ? 'all' : state.draft.language }); syncSearchFields(); }
+      changed(`أُضيفت المجموعات إلى المكتبة${result.merged ? ' مع دمج المتشابه' : ''}.`);
+      if (goSearch) location.hash = 'search'; else if (goReview) { location.hash = 'library'; route(); researchUI.review(ids[0]); }
+    } catch (e) { toast(e.message); }
+  }
   function openImport() { stagedFiles = []; importResult = null; $('importFiles').value = ''; $('collisionMode').value = 'merge'; $('importError').hidden = true; updateImportPreview(); showDialog('importDialog'); }
   function updateImportPreview() {
     $('importFileList').replaceChildren();
@@ -156,7 +171,7 @@
     try {
       let categories = C.clone(state.categories), merged = 0, duplicates = 0, renamed = 0;
       for (const file of stagedFiles) { const result = C.mergeCategories(categories, file.categories, $('collisionMode').value); categories = result.categories; merged += result.merged; duplicates += result.duplicates; renamed += result.renamed; }
-      importResult = categories; $('importPreview').textContent = `النتيجة: ${categories.length} تصنيفًا من مكتبتك و${stagedFiles.length} ملف/ملفات. دُمج ${merged} تصنيفًا، وأُزيل ${duplicates} تكرارًا، وتغيّر ${renamed} اسمًا. النسخ الكاملة تُستورد هنا كتصنيفات فقط.`; $('applyImport').disabled = false;
+      importResult = categories; $('importPreview').textContent = `النتيجة: ${categories.length} تصنيفًا من مكتبتك و${stagedFiles.length} ملف/ملفات. دُمج ${merged} تصنيفًا، وأُزيل ${duplicates} تكرارًا، وتغيّر ${renamed} اسمًا. تحفظ ملفات Web المراجعات والقوالب. عند الدمج تُحفظ مراجعات وقوالب التصنيف الموجود، وتضاف بيانات المصطلحات الجديدة.`; $('applyImport').disabled = false;
     } catch (e) { $('importError').textContent = e.message; $('importError').hidden = false; $('importPreview').textContent = 'تعذّر تطبيق هذا الدمج. قلّل الملفات أو اختر دمج الأسماء المتشابهة.'; }
   }
   $('importFiles').addEventListener('change', async e => {
@@ -183,7 +198,7 @@
   $('confirmAction').addEventListener('click', () => { const action = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); if (action) action(); });
   for (const [field, name] of Object.entries(searchFields)) $(field).addEventListener('change', () => { state.options[name] = $(field).type === 'checkbox' ? $(field).checked : name === 'batchSize' ? Number($(field).value) : $(field).value; renderPlan(); scheduleSave(); });
   // Text filters update without waiting for blur.
-  for (const field of ['account', 'searchExclude']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; renderPlan(); scheduleSave(); });
+  for (const field of ['account', 'searchExclude', 'requiredTerms']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; renderPlan(); scheduleSave(); });
   $('extraTerms').addEventListener('input', () => { state.extra = $('extraTerms').value; renderPlan(); scheduleSave(); });
   $('categoryFilter').addEventListener('input', renderChoices); $('libraryFilter').addEventListener('input', renderLibrary);
   $('selectVisible').addEventListener('click', () => { state.selected = [...new Set([...state.selected, ...filteredCategories($('categoryFilter').value).map(c => c.id)])]; changed(); });
@@ -202,13 +217,14 @@
   $('generatePrompt').addEventListener('click', () => { try { state.draft.prompt = C.makePrompt(state.draft); $('prompt').value = state.draft.prompt; scheduleSave(); toast('البرومبت جاهز. انسخه إلى أداة الذكاء التي تختارها.'); } catch (e) { toast(e.message); $('topic').focus(); } });
   $('copyPrompt').addEventListener('click', () => copy($('prompt').value));
   $('parseReply').addEventListener('click', () => {
-    const parse = () => { try { const result = C.parseResponse(state.draft.reply); for (const s of C.SECTIONS) { const g = state.draft.groups[s.key]; g.terms = result.groups[s.key].join('\n'); if (!g.title) g.title = (state.draft.topic || 'تصنيف جديد') + ' | ' + s.suffix; g.title = g.title.slice(0, 65); g.include = !!result.groups[s.key].length; } renderGroups(); scheduleSave(); $('parseInfo').textContent = `وُزّعت الإجابة.${result.invalid ? ` استُبعد ${result.invalid} هاشتاق غير صالح؛ راجعه في النص الأصلي.` : ''} راجع العبارات قبل الإضافة.`; toast('وُزّعت الإجابة على المجموعات.'); } catch (e) { toast(e.message); } };
+    const parse = () => { try { const result = C.parseResponse(state.draft.reply); for (const s of C.SECTIONS) { const g = state.draft.groups[s.key]; g.terms = result.groups[s.key].join('\n'); if (!g.title) g.title = (state.draft.topic || 'تصنيف جديد') + ' | ' + s.suffix; g.title = g.title.slice(0, 65); g.include = !!result.groups[s.key].length; } state.draft.evidence = result.evidence; state.draft.accounts = result.accounts; state.draft.exclusions = result.exclusions; state.draft.selectedAccounts = []; state.draft.useExclusions = false; renderGroups(); researchUI.renderDraftEvidence(); scheduleSave(); $('parseInfo').textContent = `وُزّعت الإجابة.${result.invalid ? ` تجاهلنا ${result.invalid} عنصرًا أو رابطًا غير صالح؛ راجع النص الأصلي.` : ''} الشواهد والحسابات مقترحة حتى تراجعها بنفسك.`; toast('وُزّعت الإجابة على المجموعات.'); } catch (e) { toast(e.message); } };
     if (C.SECTIONS.some(s => state.draft.groups[s.key].terms.trim())) confirmAction('إعادة توزيع الإجابة', 'ستُستبدل عبارات المجموعات الحالية بنص الإجابة. تبقى أسماء التصنيفات وأوصافها.', parse); else parse();
   });
   $('newDraft').addEventListener('click', () => { const reset = () => { state.draft = C.defaultDraft(); syncDraft(); $('topic').dataset.previous = ''; scheduleSave(); toast('بدأت مسودة جديدة.'); }; if (state.draft.topic || state.draft.reply || C.SECTIONS.some(s => state.draft.groups[s.key].terms)) confirmAction('مسودة جديدة', 'ستُمسح المسودة الحالية. تبقى التصنيفات المضافة في المكتبة.', reset); else reset(); });
-  $('saveGenerated').addEventListener('click', () => saveGenerated(false)); $('searchGenerated').addEventListener('click', () => saveGenerated(true));
+  $('saveGenerated').addEventListener('click', () => saveGenerated(false)); $('searchGenerated').addEventListener('click', () => saveGenerated(true)); $('reviewGenerated').addEventListener('click', () => saveGenerated(false, true));
   window.addEventListener('hashchange', () => { route(); window.scrollTo({ top: 0 }); }); window.addEventListener('pagehide', saveNow); document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
   window.addEventListener('storage', e => { if (e.key === storage.name) { writeBlocked = true; warn('تغيّرت المكتبة في تبويب آخر. أوقفنا الحفظ هنا لتجنّب الكتابة فوقها. نزّل نسختك الحالية، ثم أعد تحميل الصفحة.'); saveNow(); } });
+  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
   syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); route();
   if (loaded.warning) warn(loaded.warning); if (loaded.blocked) saveNow(); else if (!loaded.state) saveNow();
 })();

@@ -1,0 +1,16 @@
+{
+  "format": "research-hunter-draft",
+  "version": 1,
+  "groups": {
+    "AR_PHRASES": [
+      {"term":"التعلم النشط","sourceUrl":"https://example.org/learning-demo","observedAt":"2026-11-18","note":"شاهد تمثيلي لتجربة الواجهة؛ لا يثبت وجود مصدر فعلي."},
+      {"term":"التقويم التكويني","sourceUrl":"","observedAt":"","note":"مصطلح مقترح يحتاج مراجعة الصلة."},
+      {"term":"تعليم","sourceUrl":"","observedAt":"","note":"مصطلح واسع للتدرب على قرار الاستبعاد."}
+    ],
+    "AR_HASHTAGS": [{"term":"#التعلم_النشط","sourceUrl":"","observedAt":"","note":"وسم مقترح؛ لم يُفحص رواجه."}],
+    "EN_PHRASES": [{"term":"active learning","sourceUrl":"","observedAt":"","note":""}],
+    "EN_HASHTAGS": [{"term":"#ActiveLearning","sourceUrl":"","observedAt":"","note":""}]
+  },
+  "accounts": [{"handle":"demo_research","sourceUrl":"https://example.org/account-demo","observedAt":"2026-11-18","note":"حساب تمثيلي لتجربة الاختيار فقط؛ ليس توصية بحساب حقيقي."}],
+  "exclusions": ["إعلان", "توظيف"]
+}
