@@ -67,24 +67,45 @@
   function renderPlan() {
     try { const plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
     catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
-    $('startSearch').querySelector('span').textContent = state.session ? 'بدء جولة جديدة في X' : 'بدء البحث في X'; renderSession(); researchUI?.refresh();
+    $('startSearch').querySelector('span').textContent = state.session ? 'تجهيز جولات جديدة' : 'تجهيز جولات البحث'; renderSession(); researchUI?.refresh();
   }
   function renderSession() {
     const session = state.session; $('activeSession').hidden = !session;
     $('sessionCaption').textContent = session ? 'جولتك محفوظة؛ تابع من حيث توقفت' : 'جاهز للاكتشاف؟';
     if (!session) return;
-    const plan = C.buildPlan(session.terms, session.options), batch = plan.batches[session.index];
+    const plan = C.buildPlan(session.terms, session.options);
+    $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked);
+    const rows = $('roundRows'); rows.replaceChildren();
+    for (const [index, batch] of plan.batches.entries()) {
+      const row = node('tr'), number = node('th'), content = node('td', 'round-content'), action = node('td');
+      row.dataset.roundIndex = index; number.scope = 'row'; number.append(node('bdi', 'round-number', index + 1), node('small', 'round-term-count', batch.terms.length + ' عبارة'));
+      for (const term of batch.terms) content.append(node('bdi', 'round-term', term));
+      const link = node('a', 'round-open', 'فتح'); link.href = batch.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.setAttribute('aria-label', `فتح الجولة ${index + 1} في تبويب جديد`);
+      // Leave native navigation and Ctrl/Meta/middle-click behavior entirely to the browser.
+      link.addEventListener('click', () => selectBatch(index));
+      link.addEventListener('auxclick', event => { if (event.button === 1) selectBatch(index); });
+      action.append(link); row.append(number, content, action); rows.append(row);
+    }
+    renderSessionPosition(plan);
+  }
+  function renderSessionPosition(plan) {
+    const session = state.session, batch = plan.batches[session.index];
     $('roundCount').textContent = `${session.index + 1} من ${plan.batches.length}`; $('roundProgress').max = plan.batches.length; $('roundProgress').value = session.index + 1;
     $('previousBatch').disabled = session.index === 0; $('nextBatch').disabled = session.index === plan.batches.length - 1;
-    $('batchTerms').replaceChildren(...batch.terms.map(t => { const e = node('bdi', 'term-chip', t); return e; })); $('queryPreview').value = batch.query; $('manualXLink').href = batch.url;
+    $('batchTerms').replaceChildren(...batch.terms.map(t => { const e = node('bdi', 'term-chip', t); return e; })); $('queryPreview').value = batch.query;
+    $('reopenBatch').href = batch.url;
+    $('reopenBatch').setAttribute('aria-label', `فتح الجولة المحددة ${session.index + 1} في تبويب جديد`);
+    for (const row of $('roundRows').children) {
+      const current = Number(row.dataset.roundIndex) === session.index; row.classList.toggle('current-round', current);
+      const link = row.querySelector('a'); if (current) link.setAttribute('aria-current', 'step'); else link.removeAttribute('aria-current');
+    }
   }
-  function openBatch(index) {
+  function selectBatch(index) {
     if (!state.session) return;
     const plan = C.buildPlan(state.session.terms, state.session.options); if (index < 0 || index >= plan.batches.length) return;
-    const ok = xTab.navigate(plan.batches[index].url); state.session.index = index; $('popupNotice').hidden = ok; renderSession(); saveNow();
-    toast(ok ? `فُتحت دفعة البحث ${index + 1} من ${plan.batches.length} في X.` : 'الجولة جاهزة، لكن المتصفح لم يفتح النتائج. استخدم رابط الدفعة الظاهر.');
+    state.session.index = index; renderSessionPosition(plan); saveNow();
   }
-  function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); openBatch(0); } catch (e) { toast(e.message); } }
+  function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); saveNow(); toast('الجولات جاهزة في الجدول. افتح أي جولة، أو استخدم Ctrl مع النقر لفتحها في الخلفية.'); } catch (e) { toast(e.message); } }
   function renderLibrary() {
     const list = $('libraryList'); list.replaceChildren();
     for (const c of filteredCategories($('libraryFilter').value)) {
@@ -203,7 +224,8 @@
   $('categoryFilter').addEventListener('input', renderChoices); $('libraryFilter').addEventListener('input', renderLibrary);
   $('selectVisible').addEventListener('click', () => { state.selected = [...new Set([...state.selected, ...filteredCategories($('categoryFilter').value).map(c => c.id)])]; changed(); });
   $('clearSelection').addEventListener('click', () => { state.selected = []; changed(); });
-  $('startSearch').addEventListener('click', startSearch); $('previousBatch').addEventListener('click', () => openBatch(state.session.index - 1)); $('nextBatch').addEventListener('click', () => openBatch(state.session.index + 1)); $('reopenBatch').addEventListener('click', () => openBatch(state.session.index)); $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
+  $('startSearch').addEventListener('click', startSearch); $('previousBatch').addEventListener('click', () => selectBatch(state.session.index - 1)); $('nextBatch').addEventListener('click', () => selectBatch(state.session.index + 1)); $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
+  $('showRoundTerms').addEventListener('change', () => $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked));
   $('addCategory').addEventListener('click', () => editCategory());
   for (const name of ['quickBackup', 'downloadBackup']) $(name).addEventListener('click', exportBackup);
   for (const name of ['exportCategories', 'backupExportCategories']) $(name).addEventListener('click', exportCategories);
