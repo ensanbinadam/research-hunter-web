@@ -9,6 +9,8 @@
   const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: [] });
   const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, stagedFiles = [], importResult = null, importBusy = false;
   const xTab = new C.XTab(window.open.bind(window));
+  const batchTabs = new C.XBatchTabs(window.open.bind(window));
+  let bulkAttempted = '';
   let researchUI = null;
   let lastValidOptions = C.normalizeOptions(state.options);
   function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
@@ -65,8 +67,8 @@
   function syncSearchFields() { for (const [field, name] of Object.entries(searchFields)) { if ($(field).type === 'checkbox') $(field).checked = state.options[name]; else $(field).value = Array.isArray(state.options[name]) ? state.options[name].join(', ') : state.options[name]; } $('extraTerms').value = state.extra; }
   function planned() { const collected = C.collectTerms(state.categories, state.selected, state.extra); return { ...C.buildPlan(collected.terms, state.options), duplicates: collected.duplicates }; }
   function renderPlan() {
-    try { const plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
-    catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
+    try { const plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; renderBulkTabs(plan); }
+    catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; $('openAllBatches').disabled = true; $('bulkOpenStatus').hidden = true; $('bulkFallback').hidden = true; }
     $('startSearch').querySelector('span').textContent = state.session ? 'بدء جولة جديدة في X' : 'بدء البحث في X'; renderSession(); researchUI?.refresh();
   }
   function renderSession() {
@@ -85,6 +87,32 @@
     toast(ok ? `فُتحت دفعة البحث ${index + 1} من ${plan.batches.length} في X.` : 'الجولة جاهزة، لكن المتصفح لم يفتح النتائج. استخدم رابط الدفعة الظاهر.');
   }
   function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); openBatch(0); } catch (e) { toast(e.message); } }
+  function renderBulkTabs(plan) {
+    const progress = batchTabs.progress(plan.batches.map(b => b.url)), pending = progress.pendingUrls.length;
+    const attempted = bulkAttempted === JSON.stringify(plan.batches.map(b => b.url)) || progress.opened > 0;
+    $('openAllBatches').disabled = !pending;
+    $('openAllBatches').textContent = progress.opened ? pending ? `فتح الجولات المتبقية في تبويبات (${pending})` : `فُتحت جميع الجولات (${progress.total})` : `فتح جميع الجولات في تبويبات (${progress.total})`;
+    $('bulkOpenStatus').hidden = !attempted || !progress.total;
+    $('bulkOpenStatus').textContent = pending ? `فُتح ${progress.opened} من ${progress.total} تبويبًا لهذه الإعدادات خلال هذه الصفحة. إذا منع المتصفح البقية، اسمح بالنوافذ المنبثقة لموقع الصياد ثم اضغط فتح المتبقي، أو افتح الروابط أدناه.` : `فُتحت جميع الجولات: ${progress.total} تبويبًا مستقلًا. يمكنك التفرغ لتصفحها. لا يقيس هذا العداد تحميل نتائج X أو قراءتها.`;
+    $('bulkOpenStatus').classList.toggle('warning', !!pending);
+    $('bulkFallback').hidden = !attempted || !pending;
+    $('bulkPendingLinks').replaceChildren();
+    if (attempted && pending) for (const [i, batch] of plan.batches.entries()) if (progress.pendingUrls.includes(batch.url)) {
+      const a = node('a', '', `فتح الجولة ${i + 1}`); a.href = batch.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.addEventListener('click', event => { event.preventDefault(); batchTabs.openAll([batch.url]); renderBulkTabs(plan); });
+      $('bulkPendingLinks').append(a);
+    }
+  }
+  function openAllBatches() {
+    try {
+      const plan = planned(); if (!plan.batches.length) return;
+      // Open synchronously before storage, rendering, or any async work.
+      const result = batchTabs.openAll(plan.batches.map(b => b.url)); bulkAttempted = JSON.stringify(plan.batches.map(b => b.url));
+      if (!state.session || JSON.stringify([state.session.terms, state.session.options]) !== JSON.stringify([plan.terms, plan.options])) state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() };
+      renderPlan(); saveNow();
+      toast(result.pendingUrls.length ? `فُتح ${result.opened} من ${result.total} تبويبًا. راجع رسالة السماح بالنوافذ المنبثقة.` : `فُتحت جميع الجولات في ${result.total} تبويبًا مستقلًا.`);
+    } catch (e) { toast(e.message); }
+  }
   function renderLibrary() {
     const list = $('libraryList'); list.replaceChildren();
     for (const c of filteredCategories($('libraryFilter').value)) {
@@ -204,6 +232,7 @@
   $('selectVisible').addEventListener('click', () => { state.selected = [...new Set([...state.selected, ...filteredCategories($('categoryFilter').value).map(c => c.id)])]; changed(); });
   $('clearSelection').addEventListener('click', () => { state.selected = []; changed(); });
   $('startSearch').addEventListener('click', startSearch); $('previousBatch').addEventListener('click', () => openBatch(state.session.index - 1)); $('nextBatch').addEventListener('click', () => openBatch(state.session.index + 1)); $('reopenBatch').addEventListener('click', () => openBatch(state.session.index)); $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
+  $('openAllBatches').addEventListener('click', openAllBatches);
   $('addCategory').addEventListener('click', () => editCategory());
   for (const name of ['quickBackup', 'downloadBackup']) $(name).addEventListener('click', exportBackup);
   for (const name of ['exportCategories', 'backupExportCategories']) $(name).addEventListener('click', exportCategories);
