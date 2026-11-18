@@ -332,19 +332,19 @@
     previous() { const value = this.storage.getItem(this.name + '.previous'); if (!value) throw Error('لا توجد نسخة محلية سابقة بعد.'); return validateState(JSON.parse(value)); }
     raw() { return { current: this.storage.getItem(this.name), previous: this.storage.getItem(this.name + '.previous') }; }
   }
+  function openSearchTab(open, url) {
+    if (typeof url !== 'string' || !url.startsWith('https://x.com/search?')) throw Error('رابط البحث غير صالح.');
+    let ref;
+    try { ref = open(url, '_blank'); } catch { return false; }
+    if (!ref) return false;
+    // Navigate in window.open itself. X may isolate the returned window immediately.
+    // Never read or write its location, closed state, or focus after opening it.
+    try { ref.opener = null; } catch { /* A severed COOP reference is already isolated. */ }
+    return true;
+  }
   class XTab {
-    constructor(open) { this.open = open; this.ref = null; }
-    navigate(url) {
-      if (!url.startsWith('https://x.com/search?')) throw Error('رابط البحث غير صالح.');
-      try {
-        if (this.ref && !this.ref.closed) { this.ref.location.href = url; this.ref.focus(); return true; }
-      } catch { this.ref = null; }
-      try {
-        this.ref = this.open('about:blank', 'research-hunter-x');
-        if (!this.ref) return false;
-        this.ref.opener = null; this.ref.location.href = url; this.ref.focus(); return true;
-      } catch { this.ref = null; return false; }
-    }
+    constructor(open) { this.open = open; }
+    navigate(url) { return openSearchTab(this.open, url); }
   }
   class XBatchTabs {
     constructor(open) { this.open = open; this.opened = new Set(); }
@@ -358,16 +358,8 @@
       const before = this.progress(urls); let openedNow = 0, blocked = false;
       // Keep every open in the original click. Timers lose browser user activation.
       for (const url of before.pendingUrls) {
-        let ref;
-        try {
-          ref = this.open('about:blank', '_blank');
-          if (!ref) { blocked = true; break; }
-          ref.opener = null; ref.location.href = url;
-          this.opened.add(url); openedNow++;
-        } catch {
-          try { ref?.close(); } catch { /* A blocked/inaccessible blank tab cannot be closed. */ }
-          blocked = true; break;
-        }
+        if (!openSearchTab(this.open, url)) { blocked = true; break; }
+        this.opened.add(url); openedNow++;
       }
       // Count windows opened, not results loaded or read. X may sever window references.
       return { ...this.progress(urls), openedNow, blocked };

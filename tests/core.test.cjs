@@ -44,5 +44,14 @@ test('corrupt current storage recovers prior valid data', () => { const mem=memo
 test('wholly corrupt storage is flagged without overwriting input', () => { const mem=memory(), manager=new C.StorageManager(mem); mem.setItem(manager.name,'{bad'); const r=manager.read(); assert.equal(r.blocked,true); assert.equal(manager.raw().current,'{bad'); });
 test('unavailable or full local storage produces warnings, not a crash', () => { const m=new C.StorageManager({getItem(){throw Error('blocked')},setItem(){throw Error('full')}}); assert.ok(m.read().warning); assert.equal(m.save(state()).ok,false); const bad=state(); bad.options.since='bad'; assert.equal(m.save(bad).ok,false); });
 test('saved selection drops missing IDs and duplicates', () => { const s=state(); s.selected=['missing','custom-one','custom-one']; assert.deepEqual(C.validateState(s).selected,['custom-one']); });
-test('named X tab is reused for next and previous without reading X', () => { let opens=0, focuses=0; const ref={closed:false,opener:{},location:{href:''},focus(){focuses++}}; const tab=new C.XTab((url,name)=>{assert.equal(name,'research-hunter-x'); assert.equal(url,'about:blank'); opens++; return ref;}); const urls=['a','b','a'].map(q=>C.searchUrl(q)); for (const url of urls) assert.equal(tab.navigate(url),true); assert.equal(opens,1); assert.equal(focuses,3); assert.equal(ref.location.href,urls[0]); assert.equal(ref.opener,null); });
-test('closed X tab reopens under the same name, blocked popup returns false', () => { let opens=0; const tab=new C.XTab(()=>{opens++;return {closed:false,location:{},focus(){}}}); tab.navigate(C.searchUrl('a')); tab.ref.closed=true; tab.navigate(C.searchUrl('b')); assert.equal(opens,2); assert.equal(new C.XTab(()=>null).navigate(C.searchUrl('a')),false); assert.throws(()=>tab.navigate('https://evil.example')); });
+test('next and previous open full search URLs directly without touching an existing X window', () => {
+  const calls=[], refs=[];
+  const tab=new C.XTab((url,target)=>{calls.push([url,target]);const ref={get location(){throw Error('unsafe navigation');},get closed(){throw Error('isolated');},focus(){throw Error('isolated');},opener:{}};refs.push(ref);return ref;});
+  const urls=['a','b','a'].map(q=>C.searchUrl(q)); for(const url of urls)assert.equal(tab.navigate(url),true);
+  assert.deepEqual(calls,urls.map(url=>[url,'_blank']));assert.ok(refs.every(ref=>ref.opener===null));
+});
+test('isolated X references still count as opened while actual popup blocking returns false', () => {
+  const tab=new C.XTab(()=>({set opener(_){throw Error('COOP');}}));assert.equal(tab.navigate(C.searchUrl('a')),true);assert.equal(tab.navigate(C.searchUrl('b')),true);
+  assert.equal(new C.XTab(()=>null).navigate(C.searchUrl('a')),false);assert.equal(new C.XTab(()=>{throw Error('blocked');}).navigate(C.searchUrl('a')),false);
+  for(const url of ['https://evil.example',null])assert.throws(()=>tab.navigate(url));
+});
