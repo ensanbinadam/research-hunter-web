@@ -346,24 +346,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  class XBatchTabs {
-    constructor(open) { this.open = open; this.opened = new Set(); }
-    progress(urls) {
-      const all = [...new Set(urls)];
-      if (all.some(url => typeof url !== 'string' || !url.startsWith('https://x.com/search?'))) throw Error('رابط البحث غير صالح.');
-      const pendingUrls = all.filter(url => !this.opened.has(url));
-      return { total: all.length, opened: all.length - pendingUrls.length, pendingUrls };
-    }
-    openAll(urls) {
-      const before = this.progress(urls); let openedNow = 0, blocked = false;
-      // Keep every open in the original click. Timers lose browser user activation.
-      for (const url of before.pendingUrls) {
-        if (!openSearchTab(this.open, url)) { blocked = true; break; }
-        this.opened.add(url); openedNow++;
-      }
-      // Count windows opened, not results loaded or read. X may sever window references.
-      return { ...this.progress(urls), openedNow, blocked };
-    }
-  }
-  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, validateSample, csvCell, planCSV, StorageManager, XTab, XBatchTabs };
+  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, validateSample, csvCell, planCSV, StorageManager, XTab };
 });
