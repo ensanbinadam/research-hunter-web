@@ -9,22 +9,37 @@
   const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: [] });
   const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, stagedFiles = [], importResult = null, importBusy = false;
   const xTab = new C.XTab(window.open.bind(window));
-  let researchUI = null, planTimer, sessionPlanSource = null, sessionPlan = null, renderedSession = null, renderedIndex = -1;
+  let researchUI = null, planTimer, sessionPlanSource = null, sessionPlan = null, renderedSession = null, renderedIndex = -1, renderedOpenedKey = '';
   let lastValidOptions = C.normalizeOptions(state.options);
+  const dialogOpeners = new Map();
   function toast(message) { $('toastAnnouncement').textContent = message; $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
   function warn(message) { $('storageAnnouncement').textContent = message; $('storageWarning').textContent = message; $('storageWarning').hidden = !message; }
+  function renderStorageUsage() {
+    const el = $('storageUsage'); if (!el) return;
+    try {
+      const raw = storage.raw(), encoder = new TextEncoder();
+      const bytes = [raw.current, raw.previous, raw.recovery].filter(Boolean).reduce((sum, text) => sum + encoder.encode(text).length, 0);
+      const kb = (bytes / 1024).toFixed(bytes < 10240 ? 1 : 0);
+      let recoveryNote = '';
+      if (raw.recovery) { try { const count = JSON.parse(raw.recovery).length; if (count) recoveryNote = ` · سجل استعادة (${count})`; } catch { recoveryNote = ' · سجل استعادة موجود'; } }
+      el.textContent = `المساحة المحلية المستخدمة تقريبًا: ${kb} كيلوبايت${raw.previous ? ' (تشمل اللقطة السابقة)' : ''}${recoveryNote}`;
+    } catch { el.textContent = 'تعذر قياس مساحة التخزين المحلي.'; }
+  }
   function saveNow() {
     clearTimeout(saveTimer);
     if (writeBlocked) { $('saveStatus').classList.add('failed'); $('saveStatus').lastElementChild.textContent = 'الحفظ متوقف · نزّل نسخة'; return false; }
     let snapshot = state;
     try { lastValidOptions = C.normalizeOptions(state.options); } catch { snapshot = { ...state, options: lastValidOptions }; }
     const result = storage.save(snapshot); $('saveStatus').classList.toggle('failed', !result.ok); $('saveStatus').lastElementChild.textContent = result.ok ? snapshot === state ? 'محفوظ على الجهاز' : 'المكتبة محفوظة · راجع المرشحات' : 'لم يُحفظ · نزّل نسخة';
-    if (result.warning) warn(result.warning); return result.ok;
+    if (result.warning) warn(result.warning); renderStorageUsage(); return result.ok;
   }
   function scheduleSave() { clearTimeout(saveTimer); $('saveStatus').lastElementChild.textContent = writeBlocked ? 'الحفظ متوقف' : 'جارٍ الحفظ…'; saveTimer = setTimeout(saveNow, 450); }
   function changed(message) { renderLibrary(); renderChoices(); renderOverview(); renderPlan(); scheduleSave(); if (message) toast(message); }
-  function showDialog(id) { $(id).showModal(); document.body.classList.add('dialog-open'); }
-  function closeDialog(id) { $(id).close(); if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open'); }
+  function showDialog(id) { dialogOpeners.set(id, document.activeElement); $(id).showModal(); document.body.classList.add('dialog-open'); }
+  function closeDialog(id, force = false) {
+    if (!force && id === 'reviewDialog' && researchUI?.confirmCloseReview?.()) return;
+    $(id).close(); if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open');
+  }
   function confirmAction(title, text, action, details = '') { $('confirmTitle').textContent = title; $('confirmText').textContent = text; $('restoreDetails').textContent = details; $('restoreDetails').hidden = !details; pendingConfirm = action; showDialog('confirmDialog'); }
   function download(data, filename) { const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }), url = URL.createObjectURL(blob), a = node('a'); a.href = url; a.download = filename; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 15000); }
   const dateStamp = () => new Date().toISOString().slice(0, 10);
@@ -50,6 +65,7 @@
     for (const link of document.querySelectorAll('[data-view]')) { const active = link.dataset.view === view; link.classList.toggle('active', active); if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); }
     $('pageCrumb').textContent = { search: 'مساحة البحث', library: 'مكتبة التصنيفات', generator: 'مولّد التصنيفات', backup: 'النسخ الاحتياطي' }[view];
     document.title = $('pageCrumb').textContent + ' | الصياد الباحث Web';
+    if (view === 'backup') renderStorageUsage();
   }
   function renderOverview() {
     $('statCategories').textContent = state.categories.length; $('navCount').textContent = state.categories.length;
@@ -69,72 +85,118 @@
   }
   const searchFields = { resultType: 'type', searchLanguage: 'language', batchSize: 'batchSize', since: 'since', until: 'until', account: 'accounts', searchExclude: 'exclude', requiredTerms: 'required', matchMode: 'match', noReplies: 'noReplies', noReposts: 'noReposts' };
   function syncSearchFields() { for (const [field, name] of Object.entries(searchFields)) { if ($(field).type === 'checkbox') $(field).checked = state.options[name]; else $(field).value = Array.isArray(state.options[name]) ? state.options[name].join(', ') : state.options[name]; } $('extraTerms').value = state.extra; }
+  function renderFilterIndicators() {
+    const activeCount = C.countActiveFilters(state.options, state.extra);
+    const badge = $('activeFiltersBadge');
+    badge.textContent = activeCount === 1 ? '1 مفعّل' : `${activeCount} مفعّلة`;
+    badge.hidden = !activeCount;
+    const isDefault = !activeCount && state.options.type === 'latest' && state.options.language === 'all' && Number(state.options.batchSize) === 8;
+    $('resetFilters').disabled = isDefault;
+  }
   function planned() { const collected = C.collectTerms(state.categories, state.selected, state.extra); return { ...C.buildPlan(collected.terms, state.options), duplicates: collected.duplicates }; }
   function renderPlan() {
     clearTimeout(planTimer); let plan = null;
+    renderFilterIndicators();
     try { plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
     catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
-    $('startSearch').querySelector('span').textContent = state.session ? 'تجهيز جولات جديدة' : 'تجهيز جولات البحث'; renderSession(); researchUI?.refresh(plan);
+    $('startSearch').querySelector('span').textContent = state.session ? 'تجهيز جولات جديدة' : 'تجهيز جولات البحث'; renderSession(plan); researchUI?.refresh(plan);
   }
-  function schedulePlan() { clearTimeout(planTimer); planTimer = setTimeout(renderPlan, 200); }
+  function schedulePlan() { clearTimeout(planTimer); renderFilterIndicators(); planTimer = setTimeout(renderPlan, 200); }
   function savedPlan() { if (sessionPlanSource !== state.session) { sessionPlan = state.session ? C.buildPlan(state.session.terms, state.session.options) : null; sessionPlanSource = state.session; } return sessionPlan; }
-  function renderSession() {
+  function renderSession(currentPlan = null) {
     const session = state.session; $('activeSession').hidden = !session;
     $('sessionCaption').textContent = session ? 'جولتك محفوظة؛ تابع من حيث توقفت' : 'جاهز للاكتشاف؟';
-    if (!session) { renderedSession = null; renderedIndex = -1; return; }
+    if (!session) { renderedSession = null; renderedIndex = -1; renderedOpenedKey = ''; return; }
     const plan = savedPlan();
+    $('sessionStaleNotice').hidden = !(currentPlan && C.isSessionStale(session, currentPlan));
     $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked);
-    if (renderedSession === session) { if (renderedIndex !== session.index) renderSessionPosition(plan); return; }
+    const openedKey = (session.opened || []).join(',');
+    if (renderedSession === session) { if (renderedIndex !== session.index || renderedOpenedKey !== openedKey) renderSessionPosition(plan); return; }
     const rows = $('roundRows'); rows.replaceChildren();
     for (const [index, batch] of plan.batches.entries()) {
       const row = node('tr'), number = node('th'), content = node('td', 'round-content'), action = node('td');
-      row.dataset.roundIndex = index; number.scope = 'row'; number.append(node('bdi', 'round-number', index + 1), node('small', 'round-term-count', batch.terms.length + ' عبارة'));
+      row.dataset.roundIndex = index; number.scope = 'row';
+      const openedMark = node('span', 'opened-badge', 'فُتحت'); openedMark.hidden = true;
+      number.append(node('bdi', 'round-number', index + 1), node('small', 'round-term-count', batch.terms.length + ' عبارة'), openedMark);
       for (const term of batch.terms) content.append(node('bdi', 'round-term', term));
       const link = node('a', 'round-open', 'فتح'); link.href = batch.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.setAttribute('aria-label', `فتح الجولة ${index + 1} في تبويب جديد`);
       // Leave native navigation and Ctrl/Meta/middle-click behavior entirely to the browser.
-      link.addEventListener('click', () => selectBatch(index));
-      link.addEventListener('auxclick', event => { if (event.button === 1) selectBatch(index); });
+      link.addEventListener('click', () => selectBatch(index, true));
+      link.addEventListener('auxclick', event => { if (event.button === 1) selectBatch(index, true); });
       action.append(link); row.append(number, content, action); rows.append(row);
     }
     renderedSession = session; renderSessionPosition(plan);
   }
   function renderSessionPosition(plan) {
-    const session = state.session, batch = plan.batches[session.index];
-    renderedIndex = session.index;
+    const session = state.session, batch = plan.batches[session.index], opened = session.opened || [], openedSet = new Set(opened);
+    renderedIndex = session.index; renderedOpenedKey = opened.join(',');
     $('roundCount').textContent = `${session.index + 1} من ${plan.batches.length}`; $('roundProgress').max = plan.batches.length; $('roundProgress').value = session.index + 1;
+    $('roundOpenedSummary').textContent = opened.length ? `فُتحت ${opened.length} من ${plan.batches.length} جولات` : 'لم تُفتح أي جولة بعد';
+    $('clearOpenedRounds').hidden = !opened.length;
     $('previousBatch').disabled = session.index === 0; $('nextBatch').disabled = session.index === plan.batches.length - 1;
     $('batchTerms').replaceChildren(...batch.terms.map(t => { const e = node('bdi', 'term-chip', t); return e; })); $('queryPreview').value = batch.query;
     $('reopenBatch').href = batch.url;
     $('reopenBatch').setAttribute('aria-label', `فتح الجولة المحددة ${session.index + 1} في تبويب جديد`);
     for (const row of $('roundRows').children) {
-      const current = Number(row.dataset.roundIndex) === session.index; row.classList.toggle('current-round', current);
+      const idx = Number(row.dataset.roundIndex), current = idx === session.index, wasOpened = openedSet.has(idx);
+      row.classList.toggle('current-round', current); row.classList.toggle('opened-round', wasOpened);
+      const badge = row.querySelector('.opened-badge'); if (badge) badge.hidden = !wasOpened;
       const link = row.querySelector('a'); if (current) link.setAttribute('aria-current', 'step'); else link.removeAttribute('aria-current');
     }
   }
-  function selectBatch(index) {
+  function selectBatch(index, markOpened = false) {
     if (!state.session) return;
     const plan = savedPlan(); if (index < 0 || index >= plan.batches.length) return;
-    state.session.index = index; renderSessionPosition(plan); saveNow();
+    state.session.index = index;
+    if (markOpened) {
+      const opened = new Set(state.session.opened || []);
+      opened.add(index);
+      state.session.opened = [...opened].sort((a, b) => a - b);
+    }
+    renderSessionPosition(plan); saveNow();
   }
   function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); saveNow(); toast('الجولات جاهزة في الجدول. افتح أي جولة، أو استخدم Ctrl مع النقر لفتحها في الخلفية.'); } catch (e) { toast(e.message); } }
+  function duplicateCategory(id) {
+    if (state.categories.length >= C.LIMIT) return toast(`بلغت المكتبة الحد الأقصى (${C.LIMIT} تصنيفًا). احذف أو ادمج تصنيفًا أولًا.`);
+    const source = state.categories.find(c => c.id === id); if (!source) return;
+    const copyCat = C.clone(source); copyCat.id = C.id();
+    let title = (source.title.slice(0, 58) + ' (نسخة)').slice(0, 65), n = 2;
+    while (state.categories.some(c => C.key(c.title) === C.key(title))) { const tail = ` (نسخة ${n++})`; title = source.title.slice(0, 65 - tail.length) + tail; }
+    copyCat.title = title;
+    const idx = state.categories.findIndex(c => c.id === id);
+    const next = [...state.categories]; next.splice(idx + 1, 0, C.validateCategory(copyCat));
+    state.categories = C.validateCategories(next); changed(`نُسخ التصنيف باسم «${copyCat.title}».`);
+  }
   function renderLibrary() {
-    const list = $('libraryList'); list.replaceChildren();
-    for (const c of filteredCategories($('libraryFilter').value)) {
+    const list = $('libraryList'), statusFilter = $('libraryStatusFilter').value; list.replaceChildren();
+    const visible = filteredCategories($('libraryFilter').value).filter(c => {
+      if (statusFilter === 'all') return true;
+      if (statusFilter === 'preset') return !!c.preset;
+      if (statusFilter === 'exportSelected') return state.exportSelected.includes(c.id);
+      const report = C.qualityReport(c);
+      if (statusFilter === 'unreviewed') return report.candidate > 0;
+      if (statusFilter === 'alerts') return report.alerts.length > 0;
+      return true;
+    });
+    for (const c of visible) {
       const card = node('article', 'library-item' + (state.exportSelected.includes(c.id) ? ' export-selected' : '')), head = node('div', 'library-item-head'); head.append(node('span', 'category-symbol', c.symbol), node('span', '', C.activeTerms(c).length + ' فعّالة · ' + langLabel(c.language)));
       const title = node('h3', '', c.title); title.dir = 'auto'; const description = node('p', '', c.description); description.dir = 'auto'; const terms = node('div', 'preview-terms');
       terms.append(...c.terms.slice(0, 3).map(t => node('bdi', 'term-chip', t))); if (c.terms.length > 3) terms.append(node('span', '', '+' + (c.terms.length - 3)));
-      const actions = node('div', 'library-item-actions'), edit = node('button', 'text-button', 'تحرير'), search = node('button', 'text-button', 'للبحث'), del = node('button', 'text-button', 'حذف'), review = node('button', 'text-button', 'مراجعة'), preset = node('button', 'text-button', c.preset ? 'القالب ✓' : 'قالب بحث');
-      review.setAttribute('aria-label', 'مراجعة ' + c.title); preset.setAttribute('aria-label', 'قالب بحث ' + c.title); review.addEventListener('click', () => researchUI.review(c.id)); preset.addEventListener('click', () => researchUI.preset(c.id));
+      const actions = node('div', 'library-item-actions'), edit = node('button', 'text-button', 'تحرير'), dup = node('button', 'text-button', 'نسخ'), search = node('button', 'text-button', 'للبحث'), del = node('button', 'text-button', 'حذف'), review = node('button', 'text-button', 'مراجعة'), preset = node('button', 'text-button', c.preset ? 'القالب ✓' : 'قالب بحث');
+      for (const b of [review, edit, preset, dup, search, del]) b.type = 'button';
+      review.setAttribute('aria-label', 'مراجعة ' + c.title); preset.setAttribute('aria-label', 'قالب بحث ' + c.title); dup.setAttribute('aria-label', 'نسخ ' + c.title);
+      review.addEventListener('click', () => researchUI.review(c.id)); preset.addEventListener('click', () => researchUI.preset(c.id)); dup.addEventListener('click', () => duplicateCategory(c.id));
       const report = C.qualityReport(c), quality = node('div', 'library-quality', `${report.reviewed} راجعتُها · ${report.excluded} مستبعدة${report.alerts.length ? ` · ${report.alerts.length} تنبيهات صياغة` : ''}`);
       const exportChoice = node('label', 'library-export-choice'), check = node('input'); check.type = 'checkbox'; check.checked = state.exportSelected.includes(c.id); check.setAttribute('aria-label', 'تصدير ' + c.title); exportChoice.append(check, node('span', '', 'اختيار للتصدير'));
       check.addEventListener('change', () => { state.exportSelected = check.checked ? [...new Set([...state.exportSelected, c.id])] : state.exportSelected.filter(id => id !== c.id); card.classList.toggle('export-selected', check.checked); renderExportSelection(); scheduleSave(); });
       edit.setAttribute('aria-label', 'تحرير ' + c.title); del.setAttribute('aria-label', 'حذف ' + c.title); search.setAttribute('aria-label', 'البحث بتصنيف ' + c.title);
       edit.addEventListener('click', () => editCategory(c.id)); search.addEventListener('click', () => { if (!state.selected.includes(c.id)) state.selected.push(c.id); changed('أُضيف التصنيف إلى اختيارات البحث.'); location.hash = 'search'; });
       del.addEventListener('click', () => confirmAction('حذف التصنيف', `سيُحذف «${c.title}» من المكتبة المحلية. يمكنك تنزيل نسخة احتياطية قبل الحذف من الشريط العلوي.`, () => { state.categories = state.categories.filter(x => x.id !== c.id); state.selected = state.selected.filter(x => x !== c.id); state.exportSelected = state.exportSelected.filter(x => x !== c.id); changed('حُذف التصنيف.'); }));
-      actions.append(review, edit, preset, search, del); card.append(head, title, description, terms, quality, exportChoice, actions); list.append(card);
+      actions.append(review, edit, preset, dup, search, del); card.append(head, title, description, terms, quality, exportChoice, actions); list.append(card);
     }
-    if (!list.children.length) { const empty = node('div', 'empty-state'); empty.append(node('h3', '', state.categories.length ? 'لا توجد نتائج مطابقة' : 'مكتبتك جاهزة لبداية جديدة'), node('p', '', 'أضف تصنيفًا جديدًا أو استورد ملفاتك السابقة.')); list.append(empty); }
-    $('librarySummary').textContent = `${state.categories.length} تصنيفًا · ${state.categories.reduce((s, c) => s + c.terms.length, 0)} عبارة في المكتبة`;
+    if (!list.children.length) { const empty = node('div', 'empty-state'); empty.append(node('h3', '', state.categories.length ? 'لا توجد نتائج مطابقة' : 'مكتبتك جاهزة لبداية جديدة'), node('p', '', state.categories.length ? 'جرّب تغيير البحث أو مرشح الحالة.' : 'أضف تصنيفًا جديدًا أو استورد ملفاتك السابقة.')); list.append(empty); }
+    const totalTerms = state.categories.reduce((s, c) => s + c.terms.length, 0), activeCount = state.categories.reduce((s, c) => s + C.activeTerms(c).length, 0);
+    $('librarySummary').textContent = `${state.categories.length} من ${C.LIMIT} تصنيفًا · ${totalTerms} عبارة (${activeCount} فعّالة)`;
     renderExportSelection();
   }
   function renderExportSelection() {
@@ -143,36 +205,66 @@
     $('selectAllForExport').disabled = !state.categories.length || count === state.categories.length;
     $('clearExportSelection').disabled = !count;
   }
+  function updateEditTermsStats() {
+    const original = state.categories.find(c => c.id === editingId), raw = $('editTerms').value;
+    const rawLines = raw.split(/[,،;؛\n\r]+/u).map(t => t.trim()).filter(Boolean).length;
+    const terms = C.parseEditedTerms(raw, original?.terms || []);
+    const alerts = terms.filter(t => C.inspectTerm(t).length).length;
+    $('editTermsStats').textContent = terms.length ? `${terms.length} عبارة فريدة${rawLines > terms.length ? ` · أُزيل نحو ${rawLines - terms.length} تكرار` : ''}${alerts ? ` · ${alerts} تنبيه صياغة` : ''}` : 'أدخل عبارة واحدة على الأقل.';
+  }
   function editCategory(id = null) {
+    if (!id && state.categories.length >= C.LIMIT) return toast(`بلغت المكتبة الحد الأقصى (${C.LIMIT} تصنيفًا). احذف أو ادمج تصنيفًا قبل إضافة جديد.`);
     editingId = id; const c = state.categories.find(c => c.id === id);
     $('categoryDialogTitle').textContent = c ? 'تحرير التصنيف' : 'تصنيف جديد'; $('editTitle').value = c?.title || ''; $('editDescription').value = c?.description || ''; $('editLanguage').value = c?.language || 'ar'; $('editSymbol').value = c?.symbol || 'ع';
     // One line per imported term preserves punctuation inside the original phrase.
-    $('editTerms').value = c?.terms.join('\n') || ''; $('categoryFormError').hidden = true; showDialog('categoryDialog'); $('editTitle').focus();
+    $('editTerms').value = c?.terms.join('\n') || ''; $('categoryFormError').hidden = true; updateEditTermsStats(); showDialog('categoryDialog'); $('editTitle').focus();
   }
+  $('editTerms').addEventListener('input', updateEditTermsStats);
   $('categoryForm').addEventListener('submit', e => {
     e.preventDefault(); try {
       const original = state.categories.find(c => c.id === editingId), raw = $('editTerms').value;
-      const terms = original && raw === original.terms.join('\n') ? original.terms : C.parseTerms(raw);
-      const c = C.validateCategory({ ...original, id: editingId || C.id(), title: $('editTitle').value, description: $('editDescription').value.trim() || $('editTitle').value.trim(), language: $('editLanguage').value, symbol: $('editSymbol').value || 'ع', terms });
+      const terms = original && raw === original.terms.join('\n') ? original.terms : C.parseEditedTerms(raw, original?.terms || []);
+      const c = C.validateCategory({ ...original, id: editingId || C.id(), title: $('editTitle').value, description: $('editDescription').value.trim() || $('editTitle').value.trim(), language: $('editLanguage').value, symbol: $('editSymbol').value.trim() || 'ع', terms });
       const categories = editingId ? state.categories.map(x => x.id === editingId ? c : x) : [...state.categories, c]; state.categories = C.validateCategories(categories); closeDialog('categoryDialog'); changed('أُضيف التصنيف أو حُفظ تعديله.');
     } catch (error) { $('categoryFormError').textContent = error.message; $('categoryFormError').hidden = false; }
   });
+  function updateReplyHint() {
+    const text = state.draft.reply || '', trimmed = text.trim();
+    $('clearReply').hidden = !text.length;
+    if (!trimmed) { $('replyFormatHint').textContent = 'بانتظار لصق الإجابة'; return; }
+    const looksJson = trimmed.startsWith('{') || /```(?:json)?\s*\{/i.test(trimmed) || trimmed.includes('"research-hunter-draft"');
+    const looksText = /\b(?:AR_PHRASES|AR_HASHTAGS|EN_PHRASES|EN_HASHTAGS)\b/i.test(trimmed);
+    const format = looksJson ? 'تم اكتشاف بنية JSON' : looksText ? 'تم اكتشاف الأقسام النصية الأربعة' : 'لم تُكتشف بنية معروفة بعد';
+    $('replyFormatHint').textContent = `${format} · ${text.length.toLocaleString('en-US')} / 150,000 حرف`;
+  }
   function renderGroups() {
     $('generatedGroups').replaceChildren();
     for (const s of C.SECTIONS) {
       const group = state.draft.groups[s.key], card = node('section', 'generated-group'), heading = node('div', 'group-heading'), label = node('label'), check = node('input'), count = node('span');
       check.type = 'checkbox'; check.checked = group.include; check.id = 'include_' + s.key; label.append(check, document.createTextNode(s.label)); count.id = 'groupCount_' + s.key; heading.append(label, count); card.append(heading);
       check.addEventListener('change', () => { group.include = check.checked; groupSummary(); scheduleSave(); });
-      for (const [name, title, tag, max] of [['title', 'اسم التصنيف', 'input', 65], ['description', 'وصف مختصر', 'input', 120], ['terms', 'العبارات · سطر لكل عبارة أو فاصلة', 'textarea', 150000]]) {
+      for (const [name, title, tag, max] of [['title', 'اسم التصنيف', 'input', 65], ['description', 'وصف مختصر', 'input', 160], ['terms', 'العبارات · سطر لكل عبارة أو فاصلة', 'textarea', 150000]]) {
         const field = node('div', 'field'), caption = node('label', '', title), input = node(tag); input.id = name + '_' + s.key; caption.htmlFor = input.id; input.value = group[name]; input.dir = 'auto'; input.maxLength = max; if (tag === 'textarea') input.rows = 5;
         input.addEventListener('input', () => { group[name] = input.value; groupSummary(); scheduleSave(); }); field.append(caption, input); card.append(field);
       }
+      const alertBox = node('p', 'group-alerts micro-note'); alertBox.id = 'groupAlerts_' + s.key; alertBox.hidden = true; card.append(alertBox);
       $('generatedGroups').append(card);
     }
     groupSummary();
   }
-  function groupSummary() { let total = 0, included = 0, alerts = 0; for (const s of C.SECTIONS) { const g = state.draft.groups[s.key], terms = C.parseTerms(g.terms); const bad = terms.filter(t => C.inspectTerm(t).length).length; $('groupCount_' + s.key).textContent = terms.length + ' عبارة' + (bad ? ` · ${bad} تنبيه` : ''); if (g.include && terms.length) { total += terms.length; included++; alerts += bad; } } $('generatedSummary').textContent = `${included} مجموعات محددة · ${total} عبارة${alerts ? ` · ${alerts} تحتاج فحص الصياغة` : ''}`; }
-  function syncDraft() { for (const input of document.querySelectorAll('[data-draft]')) input.value = state.draft[input.dataset.draft]; $('topic').dataset.previous = state.draft.topic; renderGroups(); researchUI?.renderDraftEvidence(); }
+  function groupSummary() {
+    let total = 0, included = 0, alerts = 0;
+    for (const s of C.SECTIONS) {
+      const g = state.draft.groups[s.key], terms = C.parseTerms(g.terms);
+      const flagged = terms.map(t => ({ term: t, reasons: C.inspectTerm(t) })).filter(x => x.reasons.length);
+      $('groupCount_' + s.key).textContent = terms.length + ' عبارة' + (flagged.length ? ` · ${flagged.length} تنبيه` : '');
+      const alertBox = $('groupAlerts_' + s.key);
+      if (alertBox) { alertBox.hidden = !flagged.length; if (flagged.length) alertBox.textContent = 'تحتاج فحصًا: ' + flagged.slice(0, 3).map(f => `${f.term} (${f.reasons[0]})`).join(' · ') + (flagged.length > 3 ? ` (+${flagged.length - 3})` : ''); }
+      if (g.include && terms.length) { total += terms.length; included++; alerts += flagged.length; }
+    }
+    $('generatedSummary').textContent = `${included} مجموعات محددة · ${total} عبارة${alerts ? ` · ${alerts} تحتاج فحص الصياغة` : ''}`;
+  }
+  function syncDraft() { for (const input of document.querySelectorAll('[data-draft]')) input.value = state.draft[input.dataset.draft]; $('topic').dataset.previous = state.draft.topic; updateReplyHint(); renderGroups(); researchUI?.renderDraftEvidence(); }
   function generatedCategories() {
     const categories = [];
     for (const s of C.SECTIONS) {
@@ -186,10 +278,14 @@
   function saveGenerated(goSearch, goReview = false) {
     try {
       const incoming = generatedCategories(), result = C.mergeCategories(state.categories, incoming); state.categories = result.categories;
-      const ids = incoming.map(c => state.categories.find(x => C.key(x.title) === C.key(c.title) && (!x.language || x.language === c.language))?.id).filter(Boolean);
-      if (goSearch) { state.selected = ids; state.extra = ''; state.options = C.normalizeOptions({ batchSize: state.options.batchSize, accounts: state.draft.selectedAccounts, exclude: state.draft.useExclusions ? state.draft.exclusions.join('\n') : '', language: state.draft.language === 'both' ? 'all' : state.draft.language }); syncSearchFields(); }
-      changed(`أُضيفت المجموعات إلى المكتبة${result.merged ? ' مع دمج المتشابه' : ''}.`);
-      if (goSearch) location.hash = 'search'; else if (goReview) { location.hash = 'library'; route(); researchUI.review(ids[0]); }
+      const ids = result.targetIds;
+      if (goSearch) {
+        const langs = new Set(incoming.map(c => c.language));
+        const inferredLang = langs.size === 1 && (langs.has('ar') || langs.has('en')) ? [...langs][0] : 'all';
+        state.selected = ids; state.extra = ''; state.options = C.normalizeOptions({ batchSize: state.options.batchSize, accounts: state.draft.selectedAccounts, exclude: state.draft.useExclusions ? state.draft.exclusions.join('\n') : '', language: inferredLang }); syncSearchFields();
+      }
+      changed(`أُضيفت المجموعات إلى المكتبة${result.merged ? ' مع دمج المتشابه' : ''}${result.renamed ? ' مع تمييز الأسماء المتشابهة' : ''}.`);
+      if (goSearch) location.hash = 'search'; else if (goReview && ids.length) { location.hash = 'library'; route(); researchUI.review(ids[0]); }
     } catch (e) { toast(e.message); }
   }
   function openImport() { stagedFiles = []; importResult = null; $('importFiles').value = ''; $('collisionMode').value = 'merge'; $('importError').hidden = true; updateImportPreview(); showDialog('importDialog'); }
@@ -225,16 +321,29 @@
     } catch (error) { toast(error.message); }
   });
   for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => closeDialog(button.dataset.close));
-  for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => { if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open'); });
+  for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => {
+    if (dialog.id === 'confirmDialog') pendingConfirm = null;
+    if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open');
+    const opener = dialogOpeners.get(dialog.id); dialogOpeners.delete(dialog.id);
+    if (opener && opener.isConnected && typeof opener.focus === 'function' && !opener.closest('[hidden]')) opener.focus();
+  });
   $('confirmAction').addEventListener('click', () => { const action = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); try { if (action) action(); } catch (error) { toast(error.message || 'تعذر إتمام العملية. لم نتابع الاستبدال.'); } });
   for (const [field, name] of Object.entries(searchFields)) $(field).addEventListener('change', () => { state.options[name] = $(field).type === 'checkbox' ? $(field).checked : name === 'batchSize' ? Number($(field).value) : $(field).value; renderPlan(); scheduleSave(); });
   // Text filters update without waiting for blur.
   for (const field of ['account', 'searchExclude', 'requiredTerms']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; schedulePlan(); scheduleSave(); });
   $('extraTerms').addEventListener('input', () => { state.extra = $('extraTerms').value; schedulePlan(); scheduleSave(); });
-  $('categoryFilter').addEventListener('input', renderChoices); $('libraryFilter').addEventListener('input', renderLibrary);
+  $('resetFilters').addEventListener('click', () => { state.options = C.normalizeOptions(); state.extra = ''; lastValidOptions = C.normalizeOptions(); syncSearchFields(); renderPlan(); scheduleSave(); toast('أُعيد ضبط مرشحات البحث.'); });
+  $('categoryFilter').addEventListener('input', renderChoices); $('libraryFilter').addEventListener('input', renderLibrary); $('libraryStatusFilter').addEventListener('change', renderLibrary);
   $('selectVisible').addEventListener('click', () => { state.selected = [...new Set([...state.selected, ...filteredCategories($('categoryFilter').value).map(c => c.id)])]; changed(); });
   $('clearSelection').addEventListener('click', () => { state.selected = []; changed(); });
-  $('startSearch').addEventListener('click', startSearch); $('previousBatch').addEventListener('click', () => selectBatch(state.session.index - 1)); $('nextBatch').addEventListener('click', () => selectBatch(state.session.index + 1)); $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
+  $('startSearch').addEventListener('click', startSearch);
+  $('previousBatch').addEventListener('click', () => selectBatch(state.session.index - 1, false));
+  $('nextBatch').addEventListener('click', () => selectBatch(state.session.index + 1, false));
+  $('reopenBatch').addEventListener('click', () => { if (state.session) selectBatch(state.session.index, true); });
+  $('reopenBatch').addEventListener('auxclick', event => { if (event.button === 1 && state.session) selectBatch(state.session.index, true); });
+  $('clearOpenedRounds').addEventListener('click', () => { if (!state.session) return; delete state.session.opened; renderSessionPosition(savedPlan()); saveNow(); toast('مُسحت علامات فتح الجولات.'); });
+  $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
+  $('copyRoundUrl').addEventListener('click', () => { if (!state.session) return; copy(savedPlan().batches[state.session.index].url); });
   $('showRoundTerms').addEventListener('change', () => $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked));
   $('addCategory').addEventListener('click', () => editCategory());
   for (const name of ['quickBackup', 'downloadBackup']) $(name).addEventListener('click', exportBackup);
@@ -245,7 +354,8 @@
   $('collisionMode').addEventListener('change', updateImportPreview); $('restoreBackup').addEventListener('click', () => $('restoreFile').click());
   $('downloadPrevious').addEventListener('click', () => { try { download(C.backupArchive(storage.previous()), 'research-hunter-web-previous.json'); toast('أُعدّت اللقطة السابقة للتنزيل.'); } catch (e) { toast(e.message || 'تعذرت قراءة النسخة المحلية.'); } });
   $('downloadRaw').addEventListener('click', () => { try { download(storage.raw(), 'research-hunter-web-raw-storage.json'); toast('أُعدّت بيانات التخزين الخام للتنزيل.'); } catch { toast('الوصول إلى تخزين المتصفح غير متاح.'); } });
-  for (const input of document.querySelectorAll('[data-draft]')) input.addEventListener(input.tagName === 'SELECT' ? 'change' : 'input', () => { const name = input.dataset.draft; state.draft[name] = input.value; if (name === 'topic') for (const s of C.SECTIONS) { const old = state.draft.groups[s.key]; if (!old.title || old.title === ((input.dataset.previous || '') + ' | ' + s.suffix).slice(0, 65)) { old.title = input.value ? (input.value + ' | ' + s.suffix).slice(0, 65) : ''; $('title_' + s.key).value = old.title; } } if (name === 'topic') input.dataset.previous = input.value; scheduleSave(); });
+  for (const input of document.querySelectorAll('[data-draft]')) input.addEventListener(input.tagName === 'SELECT' ? 'change' : 'input', () => { const name = input.dataset.draft; state.draft[name] = input.value; if (name === 'reply') updateReplyHint(); if (name === 'topic') for (const s of C.SECTIONS) { const old = state.draft.groups[s.key]; if (!old.title || old.title === ((input.dataset.previous || '') + ' | ' + s.suffix).slice(0, 65)) { old.title = input.value ? (input.value + ' | ' + s.suffix).slice(0, 65) : ''; $('title_' + s.key).value = old.title; } } if (name === 'topic') input.dataset.previous = input.value; scheduleSave(); });
+  $('clearReply').addEventListener('click', () => { state.draft.reply = ''; $('aiReply').value = ''; updateReplyHint(); scheduleSave(); $('aiReply').focus(); });
   $('generatePrompt').addEventListener('click', () => { try { state.draft.prompt = C.makePrompt(state.draft); $('prompt').value = state.draft.prompt; scheduleSave(); toast('البرومبت جاهز. انسخه إلى أداة الذكاء التي تختارها.'); } catch (e) { toast(e.message); $('topic').focus(); } });
   $('copyPrompt').addEventListener('click', () => copy($('prompt').value));
   $('parseReply').addEventListener('click', () => {
@@ -255,8 +365,8 @@
   $('newDraft').addEventListener('click', () => { const reset = () => { state.draft = C.defaultDraft(); syncDraft(); $('topic').dataset.previous = ''; scheduleSave(); toast('بدأت مسودة جديدة.'); }; if (state.draft.topic || state.draft.reply || C.SECTIONS.some(s => state.draft.groups[s.key].terms)) confirmAction('مسودة جديدة', 'ستُمسح المسودة الحالية. تبقى التصنيفات المضافة في المكتبة.', reset); else reset(); });
   $('saveGenerated').addEventListener('click', () => saveGenerated(false)); $('searchGenerated').addEventListener('click', () => saveGenerated(true)); $('reviewGenerated').addEventListener('click', () => saveGenerated(false, true));
   window.addEventListener('hashchange', () => { route(); window.scrollTo({ top: 0 }); }); window.addEventListener('pagehide', saveNow); document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
-  window.addEventListener('storage', e => { if (e.key === storage.name) { writeBlocked = true; warn('تغيّرت المكتبة في تبويب آخر. أوقفنا الحفظ هنا لتجنّب الكتابة فوقها. نزّل نسختك الحالية، ثم أعد تحميل الصفحة.'); saveNow(); } });
-  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
-  syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); route();
+  window.addEventListener('storage', e => { if (e.key === storage.name || e.key === null) { writeBlocked = true; warn('تغيّرت المكتبة في تبويب آخر. أوقفنا الحفظ هنا لتجنّب الكتابة فوقها. نزّل نسختك الحالية، ثم أعد تحميل الصفحة.'); saveNow(); } });
+  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, getLastValidOptions: () => lastValidOptions, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
+  syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); renderStorageUsage(); route();
   if (loaded.warning) warn(loaded.warning); if (loaded.blocked) saveNow(); else if (!loaded.state) saveNow();
 })();

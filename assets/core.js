@@ -16,7 +16,18 @@
   const id = () => 'custom-' + (globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
   const clone = value => JSON.parse(JSON.stringify(value));
   function parseTerms(value) {
-    return unique(String(value).replace(/\\(?=[#,،])/g, '').split(/[,،;؛\n\r]+/u).map(t => t.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s+)/u, '').trim().replace(/^["“”`]+|["“”`]+$/gu, '').trim()).filter(Boolean));
+    return unique(String(value).replace(/\\(?=[#,،])/g, '').split(/[,،;؛\n\r]+/u).map(t => t.replace(/^\s*(?:[-•*]\s+|[\d\u0660-\u0669]+[.)]\s+)/u, '').trim().replace(/^["“”`]+|["“”`]+$/gu, '').trim()).filter(Boolean));
+  }
+  function parseEditedTerms(raw, originalTerms = []) {
+    const preserved = new Map((originalTerms || []).map(t => [key(t), t]));
+    const collected = [];
+    for (const line of String(raw || '').split(/\r?\n/u)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (preserved.has(key(trimmed)) && trimmed === preserved.get(key(trimmed))) collected.push(trimmed);
+      else collected.push(...parseTerms(line));
+    }
+    return unique(collected);
   }
   const validHashtag = t => /^#(?=[\p{L}\p{N}_]*\p{L})[\p{L}\p{N}_]+$/u.test(t);
   function validDate(value) {
@@ -64,12 +75,16 @@
     const excluded = new Set((category.reviews || []).filter(r => r.status === 'excluded').map(r => key(r.term)));
     return category.terms.filter(t => !excluded.has(key(t)));
   }
+  const cleanText = term => String(term).replace(/["“”\\\r\n\u0000-\u001f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/gu, ' ').replace(/\s+/gu, ' ').trim();
   function inspectTerm(term) {
     const reasons = [];
     if (term.length > 120) reasons.push('أطول من حد التصدير للإضافة');
     if (term.startsWith('#') && !validHashtag(term)) reasons.push('صياغة هاشتاق غير صحيحة');
-    if (/(?:^|\s)(?:from|to|since|until|lang|filter|is|min_faves|min_reposts):/i.test(term)) reasons.push('أمر بحث داخل عبارة؛ استخدم حقول قالب البحث');
+    if (!cleanText(term)) reasons.push('عبارة غير صالحة للاستعلام بعد إزالة علامات التنصيص');
+    if (/(?:^|\s)-?(?:from|to|since|until|lang|filter|is|url|list|near|within|min_faves|min_reposts|min_retweets|min_replies):/i.test(term)) reasons.push('أمر بحث داخل عبارة؛ استخدم حقول قالب البحث');
+    if (/^@[a-zA-Z0-9_]{1,15}$/.test(term.trim())) reasons.push('اسم حساب داخل عبارة؛ ضعه في حقل الحسابات في قالب البحث');
     if (/https?:\/\//i.test(term)) reasons.push('رابط داخل عبارة؛ ضعه في حقل الشاهد');
+    if (!term.startsWith('#') && [...term.trim()].length === 1) reasons.push('مصطلح من حرف واحد؛ قد يجلب نتائج غير مرتبطة');
     if (['أخبار', 'اخبار', 'تعليم', 'علوم', 'معلومات', 'news', 'education', 'information'].includes(key(term))) reasons.push('مصطلح واسع؛ راجع ملاءمته لهدفك');
     return reasons;
   }
@@ -88,7 +103,9 @@
     if (c.symbol != null && (typeof c.symbol !== 'string' || c.symbol.length > 4)) throw Error('رمز التصنيف يجب ألا يتجاوز 4 أحرف.');
     const terms = unique(c.terms), reviews = normalizeReviews(c.reviews, terms);
     const accountSources = normalizeAccountSources(c.accountSources);
-    return { id: c.id, title: c.title.trim(), description: c.description || c.title.trim(), symbol: c.symbol || 'ع', language: c.language === 'both' ? 'mixed' : c.language || 'mixed', terms, ...(reviews.length ? { reviews } : {}), ...(c.preset ? { preset: normalizeOptions(c.preset) } : {}), ...(accountSources.length ? { accountSources } : {}) };
+    const description = typeof c.description === 'string' ? c.description.trim() : '';
+    const symbol = typeof c.symbol === 'string' ? c.symbol.trim() : '';
+    return { id: c.id, title: c.title.trim(), description: description || c.title.trim(), symbol: symbol || 'ع', language: c.language === 'both' ? 'mixed' : c.language || 'mixed', terms, ...(reviews.length ? { reviews } : {}), ...(c.preset ? { preset: normalizeOptions(c.preset) } : {}), ...(accountSources.length ? { accountSources } : {}) };
   }
   function validateCategories(categories, allowEmpty = false) {
     if (!Array.isArray(categories) || categories.length > LIMIT || (!allowEmpty && !categories.length)) throw Error('المكتبة تدعم من 1 إلى 50 تصنيفًا.');
@@ -106,7 +123,7 @@
     return { format: data.format, categories, ...(data.format === 'research-hunter-web-backup' ? { state: validateState({ ...data.state, categories }) } : {}) };
   }
   function mergeCategories(base, incoming, mode = 'merge') {
-    const categories = clone(validateCategories(base, true)); let merged = 0, duplicates = 0, renamed = 0;
+    const categories = clone(validateCategories(base, true)), targetIds = []; let merged = 0, duplicates = 0, renamed = 0;
     for (const raw of validateCategories(incoming, true)) {
       const c = clone(raw), existing = categories.find(e => key(e.title) === key(c.title) && (!e.language || !c.language || e.language === c.language));
       if (existing && mode === 'merge') {
@@ -116,6 +133,7 @@
         if (reviews.length) existing.reviews = normalizeReviews(reviews, existing.terms);
         if (!existing.preset && c.preset) existing.preset = clone(c.preset);
         if (c.accountSources?.length) existing.accountSources = normalizeAccountSources([...(existing.accountSources || []), ...c.accountSources].slice(0, 30));
+        if (!targetIds.includes(existing.id)) targetIds.push(existing.id);
         merged++; continue;
       }
       const original = c.title; let n = 2;
@@ -123,13 +141,26 @@
       if (c.title !== original) renamed++;
       while (categories.some(e => e.id === c.id)) c.id = id();
       categories.push(c);
+      if (!targetIds.includes(c.id)) targetIds.push(c.id);
     }
-    return { categories: validateCategories(categories, true), merged, duplicates, renamed };
+    return { categories: validateCategories(categories, true), merged, duplicates, renamed, targetIds };
+  }
+  function extractJsonBlock(text) {
+    const trimmed = String(text).trim();
+    const stripped = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    if (stripped.startsWith('{')) return stripped;
+    const fenced = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i);
+    if (fenced) return fenced[1].trim();
+    if (trimmed.includes('"research-hunter-draft"') && !/^(?:#{1,6}\s*)?(?:\[)?(?:AR_PHRASES|AR_HASHTAGS|EN_PHRASES|EN_HASHTAGS)(?:\])?\s*[:：-]?/im.test(trimmed)) {
+      const start = trimmed.indexOf('{'), end = trimmed.lastIndexOf('}');
+      if (start !== -1 && end > start) return trimmed.slice(start, end + 1);
+    }
+    return null;
   }
   function parseResponse(text) {
     if (String(text).length > 150000) throw Error('الإجابة طويلة جدًا؛ استخدم حتى 150 ألف حرف.');
-    const jsonText = String(text).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    if (jsonText.startsWith('{')) return parseStructuredResponse(jsonText);
+    const jsonText = extractJsonBlock(text);
+    if (jsonText !== null) return parseStructuredResponse(jsonText);
     const groups = Object.fromEntries(SECTIONS.map(s => [s.key, []])); let active = null, found = false, invalid = 0;
     for (const original of String(text).replace(/\r\n?/g, '\n').split('\n')) {
       const line = original.trim().replace(/^\*+|\*+$/g, '');
@@ -165,8 +196,9 @@
         if (/[,،;؛]/u.test(term)) throw Error('مصطلح في JSON يحتوي فاصلة داخلية. اطلب إعادة صياغته دون فاصلة حتى لا ينقسم عند تحريره.');
         if (term.startsWith('#') && !validHashtag(term)) { invalid++; continue; }
         const section = s.language.toUpperCase() + (term.startsWith('#') ? '_HASHTAGS' : '_PHRASES'); groups[section].push(term);
-        const url = safeSource(item.sourceUrl);
-        if (url || item.note || item.observedAt) evidence.push({ term, status: 'candidate', sourceUrl: url, checkedAt: validDate(item.observedAt) ? item.observedAt : '', note: String(item.note || '').slice(0, 1000) });
+        const url = safeSource(item.sourceUrl), checkedAt = validDate(item.observedAt) ? item.observedAt : '', note = String(item.note || '').trim().slice(0, 1000);
+        if (item.observedAt && !checkedAt) invalid++;
+        if (url || note || checkedAt) evidence.push({ term, status: 'candidate', sourceUrl: url, checkedAt, note });
       }
     }
     for (const s of SECTIONS) groups[s.key] = unique(groups[s.key]);
@@ -211,7 +243,7 @@
     const terms = unique(all); return { terms, duplicates: all.length - terms.length, total: all.length, excluded: chosen.reduce((sum, c) => sum + c.terms.length - activeTerms(c).length, 0) };
   }
   const literal = term => {
-    const text = String(term).replace(/["“”\\\r\n\u0000-\u001f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/gu, ' ').replace(/\s+/gu, ' ').trim();
+    const text = cleanText(term);
     if (!text) throw Error('توجد عبارة فارغة بعد تنظيف علامات الاستعلام.');
     return validHashtag(text) ? text : '"' + text + '"';
   };
@@ -237,7 +269,12 @@
     const options = normalizeOptions(rawOptions);
     const accountQuery = options.accounts.map(h => 'from:' + h).join(' OR ');
     const suffix = [options.language !== 'all' ? 'lang:' + options.language : '', options.accounts.length > 1 ? '(' + accountQuery + ')' : accountQuery, options.since ? 'since:' + options.since : '', options.until ? 'until:' + options.until : '', options.noReplies ? '-filter:replies' : '', options.noReposts ? '-filter:retweets' : '', ...parseTerms(options.required).map(literal), ...parseTerms(options.exclude).map(t => '-' + literal(t))].filter(Boolean).join(' ');
-    const phrase = term => options.match === 'words' && !validHashtag(term) ? '(' + String(term).trim().split(/\s+/u).map(literal).join(' ') + ')' : literal(term);
+    const phrase = term => {
+      if (options.match !== 'words' || validHashtag(term)) return literal(term);
+      const parts = cleanText(term).split(/\s+/u).filter(Boolean);
+      if (!parts.length) throw Error('توجد عبارة فارغة بعد تنظيف علامات الاستعلام.');
+      return parts.length === 1 ? literal(parts[0]) : '(' + parts.map(literal).join(' ') + ')';
+    };
     const makeQuery = batch => '(' + batch.map(phrase).join(' OR ') + ')' + (suffix ? ' ' + suffix : '');
     const batches = []; let current = [];
     for (const term of unique(terms)) {
@@ -252,12 +289,31 @@
     if (current.length) batches.push(current);
     return { options, terms: unique(terms), batches: batches.map(batch => ({ terms: batch, query: makeQuery(batch), url: searchUrl(makeQuery(batch), options.type) })) };
   }
+  function countActiveFilters(options = {}, extra = '') {
+    let count = 0;
+    const rawAccounts = Array.isArray(options.accounts) ? options.accounts.filter(Boolean).length : String(options.accounts ?? options.account ?? '').trim() ? 1 : 0;
+    if (options.since) count++;
+    if (options.until) count++;
+    if (rawAccounts) count++;
+    if (String(options.exclude || '').trim()) count++;
+    if (String(options.required || '').trim()) count++;
+    if (options.match === 'words') count++;
+    if (options.noReplies) count++;
+    if (options.noReposts) count++;
+    if (String(extra || '').trim()) count++;
+    return count;
+  }
+  function isSessionStale(session, plan) {
+    if (!session || !plan) return false;
+    if (session.terms.length !== plan.terms.length || session.terms.some((t, i) => t !== plan.terms[i])) return true;
+    return JSON.stringify(session.options) !== JSON.stringify(plan.options);
+  }
   const defaultDraft = () => ({ topic: '', context: '', scope: '', timeframe: '', exclude: '', language: 'both', mode: 'both', target: 'both', precision: 'high', count: '20', prompt: '', reply: '', evidence: [], accounts: [], exclusions: [], selectedAccounts: [], useExclusions: false, groups: Object.fromEntries(SECTIONS.map(s => [s.key, { title: '', description: '', terms: '', include: true }])) });
   function validateDraft(d) {
     const base = defaultDraft(); if (d == null) return base;
     if (typeof d !== 'object' || Array.isArray(d)) throw Error('مسودة المولّد غير صالحة.');
     for (const name of ['topic', 'context', 'scope', 'timeframe', 'exclude', 'language', 'mode', 'target', 'precision', 'count', 'prompt', 'reply']) if (typeof d[name] === 'string') base[name] = d[name].slice(0, name === 'reply' ? 150000 : name === 'prompt' ? 20000 : 10000);
-    for (const s of SECTIONS) if (d.groups?.[s.key]) { const g = d.groups[s.key]; base.groups[s.key] = { title: typeof g.title === 'string' ? g.title.slice(0, 65) : '', description: typeof g.description === 'string' ? g.description.slice(0, 120) : '', terms: typeof g.terms === 'string' ? g.terms.slice(0, 150000) : '', include: g.include !== false }; }
+    for (const s of SECTIONS) if (d.groups?.[s.key]) { const g = d.groups[s.key]; base.groups[s.key] = { title: typeof g.title === 'string' ? g.title.slice(0, 65) : '', description: typeof g.description === 'string' ? g.description.slice(0, 160) : '', terms: typeof g.terms === 'string' ? g.terms.slice(0, 150000) : '', include: g.include !== false }; }
     const terms = SECTIONS.flatMap(s => parseTerms(base.groups[s.key].terms));
     base.evidence = normalizeReviews(d.evidence, terms);
     base.accounts = normalizeAccountSources(d.accounts);
@@ -271,7 +327,12 @@
     if (typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.terms) || value.terms.length > 100000 || value.terms.some(t => typeof t !== 'string' || t.length > 500)) throw Error('جولة البحث المحفوظة غير صالحة.');
     const plan = buildPlan(value.terms, value.options);
     if (!Number.isInteger(value.index) || value.index < 0 || value.index >= plan.batches.length) throw Error('موضع الجولة المحفوظة غير صالح.');
-    return { terms: plan.terms, options: plan.options, index: value.index, startedAt: typeof value.startedAt === 'string' ? value.startedAt : '' };
+    let opened = [];
+    if (value.opened != null) {
+      if (!Array.isArray(value.opened) || value.opened.length > plan.batches.length || value.opened.some(i => !Number.isInteger(i) || i < 0 || i >= plan.batches.length)) throw Error('قائمة الجولات المفتوحة غير صالحة.');
+      opened = [...new Set(value.opened)].sort((a, b) => a - b);
+    }
+    return { terms: plan.terms, options: plan.options, index: value.index, startedAt: typeof value.startedAt === 'string' ? value.startedAt : '', ...(opened.length ? { opened } : {}) };
   }
   function validateSamples(value) {
     if (value != null && (!Array.isArray(value) || value.length > 100)) throw Error('سجل مراجعات النتائج يجب ألا يتجاوز 100 عينة.');
@@ -292,7 +353,13 @@
     const repaired = { ...raw }, repairs = [];
     const component = (field, label, validate, fallback) => { try { repaired[field] = validate(raw[field]); } catch { repaired[field] = fallback(); repairs.push(label); } };
     component('options', 'مرشحات البحث', normalizeOptions, () => normalizeOptions());
-    component('session', 'الجولة المحفوظة', validateSession, () => null);
+    try { repaired.session = validateSession(raw.session); }
+    catch {
+      if (raw.session && typeof raw.session === 'object' && !Array.isArray(raw.session) && raw.session.opened != null) {
+        try { repaired.session = validateSession({ ...raw.session, opened: undefined }); repairs.push('علامات فتح الجولات'); }
+        catch { repaired.session = null; repairs.push('الجولة المحفوظة'); }
+      } else { repaired.session = null; repairs.push('الجولة المحفوظة'); }
+    }
     try { repaired.draft = validateDraft(raw.draft); }
     catch {
       const d = raw.draft && typeof raw.draft === 'object' && !Array.isArray(raw.draft) ? raw.draft : {};
@@ -408,5 +475,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, csvCell, planCSV, StorageManager, XTab };
+  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, csvCell, planCSV, StorageManager, XTab };
 });

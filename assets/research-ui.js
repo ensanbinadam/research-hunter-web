@@ -1,8 +1,8 @@
 (function () {
   'use strict';
   window.HunterResearchUI = function (hooks) {
-    const { C, $, node, getState, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route } = hooks;
-    let presetId = null;
+    const { C, $, node, getState, getLastValidOptions, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route } = hooks;
+    let presetId = null, savedReviewSnapshot = null, activeCategoryId = '', activeTermKey = '', activeFilter = 'all', activeFind = '';
     const today = () => { const d = new Date(); return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-'); };
     const button = (text, action, className = 'button ghost small') => { const b = node('button', className, text); b.type = 'button'; b.addEventListener('click', action); return b; };
     const link = (text, url) => { const a = node('a', '', text); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a; };
@@ -11,53 +11,148 @@
     }
     const category = () => getState().categories.find(c => c.id === $('reviewCategory').value);
     const currentTerm = () => category()?.terms.find(t => C.key(t) === $('reviewTerm').value);
-    function review(id) {
-      $('reviewCategory').replaceChildren(...getState().categories.map(c => { const o = node('option', '', c.title); o.value = c.id; return o; }));
-      $('reviewCategory').value = id; $('reviewFilter').value = 'all'; $('reviewFind').value = ''; renderReviewTerms(); showDialog('reviewDialog');
-    }
-    function renderReviewTerms(preferred) {
-      const c = category(); if (!c) return;
-      const report = C.qualityReport(c), reviews = new Map((c.reviews || []).map(r => [C.key(r.term), r]));
-      $('reviewStats').replaceChildren(...[[report.active, 'عبارة فعّالة'], [report.reviewed, 'راجعتها ووجدتها ملائمة'], [report.excluded, 'مستبعدة'], [report.alerts.length, 'تحتاج فحصًا للصياغة']].map(([value, caption]) => { const s = node('div'); s.append(node('strong', '', value), node('span', '', caption)); return s; }));
-      const oldSources = $('reviewAccountSources'); if (oldSources) oldSources.remove();
-      if (c.accountSources?.length) { const details = node('details', 'account-source-details'); details.id = 'reviewAccountSources'; details.append(node('summary', '', 'شواهد الحسابات المقترحة المرفقة')); for (const a of c.accountSources) { const row = node('p'); row.append(link('@' + a.handle, 'https://x.com/' + a.handle), document.createTextNode(' · ' + a.note + (a.observedAt ? ' · ' + a.observedAt : ''))); if (a.sourceUrl) row.append(document.createTextNode(' · '), link('الشاهد المقترح', a.sourceUrl)); details.append(row); } $('reviewStats').after(details); }
-      const selected = preferred || $('reviewTerm').value, filter = $('reviewFilter').value, find = C.key($('reviewFind').value);
-      const terms = c.terms.filter(t => {
+    function filterTermsFor(c, filter, findText) {
+      if (!c) return [];
+      const reviews = new Map((c.reviews || []).map(r => [C.key(r.term), r])), find = C.key(findText);
+      return c.terms.filter(t => {
         const status = reviews.get(C.key(t))?.status || 'candidate';
         return C.key(t).includes(find) && (filter === 'all' || filter === status || filter === 'hashtags' && t.startsWith('#') || filter === 'alerts' && C.inspectTerm(t).length);
       });
-      $('reviewTerm').replaceChildren(...terms.map(t => { const status = reviews.get(C.key(t))?.status; const o = node('option', '', (status === 'excluded' ? 'مستبعد · ' : status === 'reviewed' ? 'راجعتُه · ' : '') + t); o.value = C.key(t); o.dir = 'auto'; return o; }));
-      if (terms.some(t => C.key(t) === selected)) $('reviewTerm').value = selected;
+    }
+    function isReviewDirty() {
+      if (!savedReviewSnapshot) return false;
+      return $('reviewStatus').value !== savedReviewSnapshot.status || $('reviewDate').value !== savedReviewSnapshot.checkedAt || $('reviewSource').value.trim() !== savedReviewSnapshot.sourceUrl || $('reviewNote').value !== savedReviewSnapshot.note;
+    }
+    function updateReviewDirty() { $('reviewDirtyBadge').hidden = !isReviewDirty(); }
+    function guardDirty(proceed, revert = null, message = 'لديك تعديلات غير محفوظة لهذا المصطلح. هل تريد تجاهلها والانتقال؟') {
+      if (!isReviewDirty()) return proceed();
+      if (revert) revert();
+      confirmAction('تعديلات غير محفوظة', message, () => { savedReviewSnapshot = null; updateReviewDirty(); proceed(); });
+    }
+    function confirmCloseReview() {
+      if (!isReviewDirty()) return false;
+      confirmAction('تعديلات غير محفوظة', 'لديك تعديلات غير محفوظة لهذا المصطلح. هل تريد تجاهلها وإغلاق المراجعة؟', () => { savedReviewSnapshot = null; updateReviewDirty(); closeDialog('reviewDialog', true); });
+      return true;
+    }
+    function review(id) {
+      const categories = getState().categories;
+      if (!categories.length) return toast('لا توجد تصنيفات للمراجعة بعد.');
+      const targetId = categories.some(c => c.id === id) ? id : categories[0].id;
+      savedReviewSnapshot = null; updateReviewDirty();
+      $('reviewCategory').replaceChildren(...categories.map(c => { const o = node('option', '', c.title); o.value = c.id; return o; }));
+      $('reviewCategory').value = targetId; activeCategoryId = targetId; activeTermKey = ''; activeFilter = 'all'; activeFind = '';
+      $('reviewFilter').value = 'all'; $('reviewFind').value = ''; renderReviewTerms(''); showDialog('reviewDialog');
+    }
+    function renderReviewTerms(preferred, preserveDirty = false) {
+      const c = category(); if (!c) return;
+      activeCategoryId = c.id; activeFilter = $('reviewFilter').value; activeFind = $('reviewFind').value;
+      const report = C.qualityReport(c), reviews = new Map((c.reviews || []).map(r => [C.key(r.term), r]));
+      $('reviewStats').replaceChildren(...[[report.active, 'عبارة فعّالة'], [report.reviewed, 'راجعتها ووجدتها ملائمة'], [report.excluded, 'مستبعدة'], [report.alerts.length, 'تحتاج فحصًا للصياغة']].map(([value, caption]) => { const s = node('div'); s.append(node('strong', '', value), node('span', '', caption)); return s; }));
+      const oldSources = $('reviewAccountSources'); if (oldSources) oldSources.remove();
+      if (c.accountSources?.length) {
+        const details = node('details', 'account-source-details'); details.id = 'reviewAccountSources'; details.append(node('summary', '', 'شواهد الحسابات المقترحة المرفقة'));
+        for (const a of c.accountSources) {
+          const row = node('p'); row.append(link('@' + a.handle, 'https://x.com/' + a.handle));
+          const metaParts = [a.note, a.observedAt].filter(Boolean);
+          if (metaParts.length) row.append(document.createTextNode(' · ' + metaParts.join(' · ')));
+          if (a.sourceUrl) row.append(document.createTextNode(' · '), link('الشاهد المقترح', a.sourceUrl));
+          details.append(row);
+        }
+        $('reviewStats').after(details);
+      }
+      const selected = preferred !== undefined ? preferred : $('reviewTerm').value;
+      const terms = filterTermsFor(c, activeFilter, activeFind);
+      $('reviewTerm').replaceChildren(...terms.map(t => {
+        const rev = reviews.get(C.key(t)), status = rev?.status, hasAlerts = C.inspectTerm(t).length > 0;
+        const prefix = status === 'excluded' ? '✕ مستبعد · ' : status === 'reviewed' ? '✓ ملائم · ' : '• ';
+        const tags = [hasAlerts ? '[تنبيه]' : '', rev?.sourceUrl ? '[شاهد]' : ''].filter(Boolean).join(' ');
+        const o = node('option', '', prefix + t + (tags ? ' ' + tags : '')); o.value = C.key(t); o.dir = 'auto'; return o;
+      }));
+      if (selected && terms.some(t => C.key(t) === selected)) $('reviewTerm').value = selected;
       else if (terms.length) $('reviewTerm').selectedIndex = 0;
       if (!terms.length) { const o = node('option', '', 'لا توجد مصطلحات بهذا المرشح'); o.value = ''; $('reviewTerm').append(o); }
+      if (preserveDirty && savedReviewSnapshot && savedReviewSnapshot.categoryId === c.id && savedReviewSnapshot.termKey === $('reviewTerm').value) {
+        activeTermKey = $('reviewTerm').value;
+        const index = $('reviewTerm').selectedIndex;
+        $('reviewPrevious').disabled = !activeTermKey || index < 1;
+        $('reviewNext').disabled = !activeTermKey || index >= $('reviewTerm').options.length - 1;
+        return;
+      }
       fillReview();
     }
     function fillReview() {
       const term = currentTerm(), c = category(), r = c?.reviews?.find(r => C.key(r.term) === C.key(term || ''));
+      activeTermKey = $('reviewTerm').value;
       for (const control of $('termReviewForm').elements) control.disabled = !term;
       $('reviewStatus').value = r?.status || 'candidate'; $('reviewDate').value = r?.checkedAt || ''; $('reviewSource').value = r?.sourceUrl || ''; $('reviewNote').value = r?.note || ''; $('reviewError').hidden = true;
+      savedReviewSnapshot = term ? { categoryId: c.id, termKey: activeTermKey, status: $('reviewStatus').value, checkedAt: $('reviewDate').value, sourceUrl: $('reviewSource').value.trim(), note: $('reviewNote').value } : null;
+      updateReviewDirty();
       const reasons = term ? C.inspectTerm(term) : [];
       $('reviewAlerts').textContent = reasons.join(' · '); $('reviewAlerts').hidden = !reasons.length;
       const index = $('reviewTerm').selectedIndex; $('reviewPrevious').disabled = !term || index < 1; $('reviewNext').disabled = !term || index >= $('reviewTerm').options.length - 1;
       syncSourceLink();
-      $('reviewXLink').hidden = !term; if (term) $('reviewXLink').href = C.searchUrl('(' + C.literal(term) + ')');
+      let termUrl = '';
+      if (term) { try { termUrl = C.searchUrl('(' + C.literal(term) + ')'); } catch { termUrl = ''; } }
+      $('reviewXLink').hidden = !termUrl; $('reviewSearchX').disabled = !termUrl;
+      if (termUrl) $('reviewXLink').href = termUrl; else $('reviewXLink').removeAttribute('href');
     }
     function syncSourceLink() {
       try { const url = C.sourceUrl($('reviewSource').value.trim()); $('reviewSourceLink').hidden = !url; if (url) $('reviewSourceLink').href = url; }
       catch { $('reviewSourceLink').hidden = true; $('reviewSourceLink').removeAttribute('href'); }
     }
-    const reviewXLink = link('رابط بحث المصطلح', 'https://x.com/search'); reviewXLink.id = 'reviewXLink'; $('termReviewForm').querySelector('.actions').append(reviewXLink);
-    $('reviewCategory').addEventListener('change', () => renderReviewTerms()); $('reviewFilter').addEventListener('change', () => renderReviewTerms()); $('reviewFind').addEventListener('input', () => renderReviewTerms()); $('reviewTerm').addEventListener('change', fillReview); $('reviewSource').addEventListener('input', syncSourceLink);
-    for (const [id, delta] of [['reviewPrevious', -1], ['reviewNext', 1]]) $(id).addEventListener('click', () => { const next = $('reviewTerm').selectedIndex + delta; if (next >= 0 && next < $('reviewTerm').options.length) { $('reviewTerm').selectedIndex = next; fillReview(); } });
-    $('reviewSearchX').addEventListener('click', () => { const term = currentTerm(); if (term) toast(xTab.navigate(C.searchUrl('(' + C.literal(term) + ')')) ? 'فُتح بحث المصطلح للمراجعة اليدوية. احفظ حكمك بعد العودة.' : 'تعذر فتح التبويب. استخدم رابط بحث المصطلح.'); });
-    $('termReviewForm').addEventListener('submit', e => {
-      e.preventDefault(); const c = category(), term = currentTerm(); if (!c || !term) return;
+    function saveCurrentReview(overrideStatus = null, advanceNext = false) {
+      const c = category(), term = currentTerm(); if (!c || !term) return;
       try {
-        const status = $('reviewStatus').value, entry = { term, status, sourceUrl: $('reviewSource').value.trim(), checkedAt: $('reviewDate').value || (status === 'candidate' ? '' : today()), note: $('reviewNote').value };
+        const status = overrideStatus || $('reviewStatus').value;
+        const nextOption = advanceNext ? ($('reviewTerm').options[$('reviewTerm').selectedIndex + 1]?.value || '') : C.key(term);
+        const entry = { term, status, sourceUrl: $('reviewSource').value.trim(), checkedAt: $('reviewDate').value || (status === 'candidate' ? '' : today()), note: $('reviewNote').value };
         const updated = C.validateCategory({ ...c, reviews: [...(c.reviews || []).filter(r => C.key(r.term) !== C.key(term)), entry] });
-        getState().categories = getState().categories.map(x => x.id === c.id ? updated : x); changed('حُفظت المراجعة؛ المستبعد لا يدخل البحث أو تصدير الإضافة.'); renderReviewTerms(C.key(term));
+        getState().categories = getState().categories.map(x => x.id === c.id ? updated : x);
+        savedReviewSnapshot = null; updateReviewDirty();
+        const statusMsg = status === 'excluded' ? 'استُبعد المصطلح من البحث والتصدير للإضافة.' : status === 'reviewed' ? 'سُجّل المصطلح ملائمًا.' : 'حُفظت المراجعة.';
+        changed(advanceNext && !nextOption ? `${statusMsg} وصلتَ إلى نهاية هذه القائمة.` : statusMsg);
+        renderReviewTerms(advanceNext ? (nextOption || C.key(term)) : C.key(term));
       } catch (error) { $('reviewError').textContent = error.message; $('reviewError').hidden = false; }
+    }
+    const reviewXLink = link('رابط بحث المصطلح', 'https://x.com/search'); reviewXLink.id = 'reviewXLink'; $('termReviewForm').querySelector('.actions').append(reviewXLink);
+    for (const id of ['reviewStatus', 'reviewDate', 'reviewSource', 'reviewNote']) $(id).addEventListener(id === 'reviewStatus' || id === 'reviewDate' ? 'change' : 'input', updateReviewDirty);
+    $('reviewCategory').addEventListener('change', () => {
+      const target = $('reviewCategory').value;
+      if (target === activeCategoryId) return;
+      guardDirty(() => { $('reviewCategory').value = target; activeCategoryId = target; renderReviewTerms(''); }, () => { $('reviewCategory').value = activeCategoryId; }, 'لديك تعديلات غير محفوظة لهذا المصطلح. هل تريد تجاهلها وتغيير التصنيف؟');
     });
+    $('reviewFilter').addEventListener('change', () => {
+      const target = $('reviewFilter').value;
+      if (target === activeFilter) return;
+      if (activeTermKey && filterTermsFor(category(), target, activeFind).some(t => C.key(t) === activeTermKey)) { activeFilter = target; renderReviewTerms(activeTermKey, true); return; }
+      guardDirty(() => { $('reviewFilter').value = target; activeFilter = target; renderReviewTerms(''); }, () => { $('reviewFilter').value = activeFilter; }, 'لديك تعديلات غير محفوظة لهذا المصطلح، والمرشح الجديد سيُخفيه. هل تريد تجاهل التعديلات والمتابعة؟');
+    });
+    $('reviewFind').addEventListener('input', () => {
+      const target = $('reviewFind').value;
+      if (target === activeFind) return;
+      if (activeTermKey && filterTermsFor(category(), activeFilter, target).some(t => C.key(t) === activeTermKey)) { activeFind = target; renderReviewTerms(activeTermKey, true); return; }
+      guardDirty(() => { $('reviewFind').value = target; activeFind = target; renderReviewTerms(''); }, () => { $('reviewFind').value = activeFind; }, 'لديك تعديلات غير محفوظة لهذا المصطلح، والبحث الجديد سيُخفيه. هل تريد تجاهل التعديلات والمتابعة؟');
+    });
+    $('reviewTerm').addEventListener('change', () => {
+      const target = $('reviewTerm').value;
+      if (target === activeTermKey) return;
+      guardDirty(() => { $('reviewTerm').value = target; fillReview(); }, () => { $('reviewTerm').value = activeTermKey; });
+    });
+    $('reviewDialog').addEventListener('cancel', e => { if (!isReviewDirty()) return; e.preventDefault(); confirmCloseReview(); });
+    $('reviewDialog').addEventListener('close', () => { savedReviewSnapshot = null; updateReviewDirty(); });
+    $('reviewSource').addEventListener('input', syncSourceLink);
+    for (const [id, delta] of [['reviewPrevious', -1], ['reviewNext', 1]]) $(id).addEventListener('click', () => {
+      const next = $('reviewTerm').selectedIndex + delta;
+      if (next >= 0 && next < $('reviewTerm').options.length) guardDirty(() => { $('reviewTerm').selectedIndex = next; fillReview(); });
+    });
+    $('reviewSearchX').addEventListener('click', () => {
+      const term = currentTerm(); if (!term) return;
+      try { toast(xTab.navigate(C.searchUrl('(' + C.literal(term) + ')')) ? 'فُتح بحث المصطلح للمراجعة اليدوية. احفظ حكمك بعد العودة.' : 'تعذر فتح التبويب. استخدم رابط بحث المصطلح.'); }
+      catch (error) { toast(error.message); }
+    });
+    $('termReviewForm').addEventListener('submit', e => { e.preventDefault(); saveCurrentReview(null, false); });
+    $('reviewApproveNext').addEventListener('click', () => saveCurrentReview('reviewed', true));
+    $('reviewExcludeNext').addEventListener('click', () => saveCurrentReview('excluded', true));
 
     const presetSchema = [
       ['accounts', 'من حساب أو عدة حسابات', 'textarea'], ['exclude', 'عبارات مستبعدة', 'textarea'], ['required', 'عبارات يجب وجودها جميعًا', 'input'],
@@ -78,7 +173,10 @@
     }
     function preset(id) {
       const c = getState().categories.find(c => c.id === id); if (!c) return; presetId = id;
-      const options = C.normalizeOptions(c.preset || getState().options); $('presetCategoryName').textContent = c.title; $('presetError').hidden = true;
+      let options;
+      try { options = C.normalizeOptions(c.preset || getState().options); }
+      catch { options = C.normalizeOptions(getLastValidOptions ? getLastValidOptions() : undefined); }
+      $('presetCategoryName').textContent = c.title; $('presetError').hidden = true;
       for (const [name, , type] of presetSchema) { const el = $('preset_' + name); if (type === 'checkbox') el.checked = options[name]; else el.value = name === 'accounts' ? options.accounts.join(', ') : options[name]; }
       $('removePreset').disabled = !c.preset; showDialog('presetDialog');
     }
@@ -146,13 +244,15 @@
     function refresh(plan) {
       const state = getState(), current = $('savedPreset').value;
       const placeholder = node('option', '', 'اختر تصنيفًا له قالب محفوظ'); placeholder.value = '';
-      $('savedPreset').replaceChildren(placeholder, ...state.categories.filter(c => c.preset).map(c => { const o = node('option', '', c.title); o.value = c.id; return o; })); $('savedPreset').value = current;
-      $('saveCurrentPreset').disabled = state.selected.length !== 1; $('loadPreset').disabled = !state.categories.some(c => c.preset);
+      const withPreset = state.categories.filter(c => c.preset);
+      $('savedPreset').replaceChildren(placeholder, ...withPreset.map(c => { const o = node('option', '', c.title); o.value = c.id; return o; }));
+      $('savedPreset').value = withPreset.some(c => c.id === current) ? current : '';
+      $('saveCurrentPreset').disabled = state.selected.length !== 1; $('loadPreset').disabled = !withPreset.length;
       const chosen = state.categories.filter(c => state.selected.includes(c.id)), excluded = chosen.reduce((sum, c) => sum + c.terms.length - C.activeTerms(c).length, 0), alerts = chosen.flatMap(C.activeTerms).filter(t => C.inspectTerm(t).length).length;
       $('planReviewSummary').textContent = `${excluded} عبارة مستبعدة بمراجعتك${alerts ? ` · ${alerts} عبارة تستحق فحص الصياغة من المكتبة` : ''}`;
       csv.disabled = urls.disabled = !plan?.batches.length;
       sampleDetails.hidden = !state.session;
     }
-    return { review, preset, refresh, renderDraftEvidence };
+    return { review, preset, refresh, renderDraftEvidence, confirmCloseReview };
   };
 })();
