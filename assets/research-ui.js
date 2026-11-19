@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   window.HunterResearchUI = function (hooks) {
-    const { C, $, node, getState, getLastValidOptions, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route } = hooks;
+    const { C, $, node, getState, getLastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route } = hooks;
     let presetId = null, savedReviewSnapshot = null, activeCategoryId = '', activeTermKey = '', activeFilter = 'all', activeFind = '';
     const today = () => { const d = new Date(); return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-'); };
     const button = (text, action, className = 'button ghost small') => { const b = node('button', className, text); b.type = 'button'; b.addEventListener('click', action); return b; };
@@ -34,14 +34,14 @@
       confirmAction('تعديلات غير محفوظة', 'لديك تعديلات غير محفوظة لهذا المصطلح. هل تريد تجاهلها وإغلاق المراجعة؟', () => { savedReviewSnapshot = null; updateReviewDirty(); closeDialog('reviewDialog', true); });
       return true;
     }
-    function review(id) {
+    function review(id, preferredTermKey = '') {
       const categories = getState().categories;
       if (!categories.length) return toast('لا توجد تصنيفات للمراجعة بعد.');
       const targetId = categories.some(c => c.id === id) ? id : categories[0].id;
       savedReviewSnapshot = null; updateReviewDirty();
       $('reviewCategory').replaceChildren(...categories.map(c => { const o = node('option', '', c.title); o.value = c.id; return o; }));
       $('reviewCategory').value = targetId; activeCategoryId = targetId; activeTermKey = ''; activeFilter = 'all'; activeFind = '';
-      $('reviewFilter').value = 'all'; $('reviewFind').value = ''; renderReviewTerms(''); showDialog('reviewDialog');
+      $('reviewFilter').value = 'all'; $('reviewFind').value = ''; renderReviewTerms(preferredTermKey); showDialog('reviewDialog');
     }
     function renderReviewTerms(preferred, preserveDirty = false) {
       const c = category(); if (!c) return;
@@ -62,6 +62,10 @@
       }
       const selected = preferred !== undefined ? preferred : $('reviewTerm').value;
       const terms = filterTermsFor(c, activeFilter, activeFind);
+      if ($('reviewVisibleCount')) $('reviewVisibleCount').textContent = terms.length;
+      if ($('bulkApproveVisible')) $('bulkApproveVisible').disabled = !terms.length;
+      if ($('bulkExcludeAlerts')) $('bulkExcludeAlerts').disabled = !terms.some(t => C.inspectTerm(t).length);
+      if ($('bulkResetVisible')) $('bulkResetVisible').disabled = !terms.length;
       $('reviewTerm').replaceChildren(...terms.map(t => {
         const rev = reviews.get(C.key(t)), status = rev?.status, hasAlerts = C.inspectTerm(t).length > 0;
         const prefix = status === 'excluded' ? '✕ مستبعد · ' : status === 'reviewed' ? '✓ ملائم · ' : '• ';
@@ -153,6 +157,23 @@
     $('termReviewForm').addEventListener('submit', e => { e.preventDefault(); saveCurrentReview(null, false); });
     $('reviewApproveNext').addEventListener('click', () => saveCurrentReview('reviewed', true));
     $('reviewExcludeNext').addEventListener('click', () => saveCurrentReview('excluded', true));
+    function runBulkReview(status, onlyAlerts, title, summaryText) {
+      const c = category(); if (!c) return;
+      const visible = filterTermsFor(c, activeFilter, activeFind);
+      const targets = onlyAlerts ? visible.filter(t => C.inspectTerm(t).length) : visible;
+      if (!targets.length) return toast('لا توجد مصطلحات مطابقة لتطبيق الإجراء الجماعي.');
+      const dirtyPrefix = isReviewDirty() ? 'لديك تعديلات غير محفوظة في نموذج المصطلح الحالي ستُتجاهل عند المتابعة. ' : '';
+      confirmAction(title, `${dirtyPrefix}سيُطبَّق «${summaryText}» على ${targets.length} مصطلحًا ظاهرًا في القائمة الحالية مع الحفاظ على الملاحظات والشواهد المحفوظة سابقًا.`, () => {
+        const result = C.bulkUpdateReviews(c, targets, status, status === 'candidate' ? '' : today());
+        getState().categories = getState().categories.map(x => x.id === c.id ? result.category : x);
+        savedReviewSnapshot = null; updateReviewDirty();
+        changed(`حُدّث ${result.updatedCount} مصطلحًا (${summaryText}).`);
+        renderReviewTerms(activeTermKey);
+      });
+    }
+    if ($('bulkApproveVisible')) $('bulkApproveVisible').addEventListener('click', () => runBulkReview('reviewed', false, 'اعتماد القائمة الظاهرة', 'ملائم بعد مراجعتي'));
+    if ($('bulkExcludeAlerts')) $('bulkExcludeAlerts').addEventListener('click', () => runBulkReview('excluded', true, 'استبعاد ذوات التنبيهات', 'مستبعد من البحث'));
+    if ($('bulkResetVisible')) $('bulkResetVisible').addEventListener('click', () => runBulkReview('candidate', false, 'إعادة إلى مقترح', 'مقترح يحتاج مراجعة'));
 
     const presetSchema = [
       ['accounts', 'من حساب أو عدة حسابات', 'textarea'], ['exclude', 'عبارات مستبعدة', 'textarea'], ['required', 'عبارات يجب وجودها جميعًا', 'input'],
@@ -200,14 +221,23 @@
     });
     $('exportWebLibrary').addEventListener('click', () => { try { download(C.webLibraryArchive(getState().categories, getState().exportSelected), 'research-hunter-web-library.json'); toast('أُعدّت مكتبة Web مع المراجعات والقوالب.'); } catch (error) { toast(error.message); } });
 
-    const exportActions = node('div', 'actions plan-exports'), csv = button('تنزيل الدفعات CSV', () => exportPlan('csv')), urls = button('تنزيل روابط الدفعات', () => exportPlan('txt'));
-    exportActions.append(csv, urls); $('researchSearchTools').append(exportActions);
+    const planExportLabel = node('p', 'micro-note export-group-label', 'تصدير دفعات الاختيارات الحالية');
+    const exportActions = node('div', 'actions plan-exports'), csv = button('CSV الاختيارات الحالية', () => exportBatches(planned, 'csv', 'research-hunter-search-batches')), urls = button('روابط الاختيارات الحالية', () => exportBatches(planned, 'txt', 'research-hunter-search-batches'));
+    exportActions.append(csv, urls); $('researchSearchTools').append(planExportLabel, exportActions);
     const sampleDetails = node('details', 'sample-entry'), summary = node('summary', '', 'تسجيل فائدة عينة راجعتها'), sampleForm = node('form'); sampleForm.id = 'sampleForm'; sampleDetails.append(summary, sampleForm);
     for (const [name, caption, type, max] of [['sampleLabel', 'اسم التجربة (مثل: البرومبت الحالي / المحسّن)', 'text', 65], ['sampleReviewed', 'عدد المنشورات التي راجعتها', 'number', 10000], ['sampleRelevant', 'عدد المنشورات الملائمة منها', 'number', 10000], ['sampleNote', 'ملاحظات العينة والفترة', 'text', 1000]]) {
       const field = node('div', 'field'), label = node('label', '', caption), input = node('input'); input.id = name; input.type = type; label.htmlFor = name; if (type === 'number') { input.min = name === 'sampleReviewed' ? '1' : '0'; input.max = max; input.step = '1'; } else input.maxLength = max; input.required = name !== 'sampleNote'; field.append(label, input); sampleForm.append(field);
     }
     const saveSample = node('button', 'button ghost full', 'حفظ مراجعة العينة'); saveSample.type = 'submit'; sampleForm.append(saveSample, node('p', 'micro-note', 'يُربط السجل بالدفعة الحالية. الأعداد تدخلها أنت؛ لا نقرأ نتائج X أو نحسب انتشار الوسوم.')); $('researchSearchTools').append(sampleDetails, button('سجل مراجعات النتائج', () => { renderSamples(); showDialog('samplesDialog'); }, 'text-button full'));
-    function exportPlan(format) { try { const plan = planned(); if (!plan.batches.length) throw Error('اختر تصنيفات أو عبارات أولًا.'); textDownload(format === 'csv' ? C.planCSV(plan) : plan.batches.map(b => b.url).join('\r\n'), 'research-hunter-search-batches.' + format, format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8'); } catch (error) { toast(error.message); } }
+    function exportBatches(getPlan, format, baseName) {
+      try {
+        const planObj = typeof getPlan === 'function' ? getPlan() : getPlan;
+        if (!planObj || !planObj.batches.length) throw Error('لا توجد دفعات جاهزة للتصدير.');
+        textDownload(format === 'csv' ? C.planCSV(planObj) : planObj.batches.map(b => b.url).join('\r\n'), baseName + '.' + format, format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8');
+      } catch (error) { toast(error.message); }
+    }
+    if ($('exportSessionCsv')) $('exportSessionCsv').addEventListener('click', () => exportBatches(savedPlan, 'csv', 'research-hunter-session-batches'));
+    if ($('exportSessionUrls')) $('exportSessionUrls').addEventListener('click', () => exportBatches(savedPlan, 'txt', 'research-hunter-session-batches'));
     sampleForm.addEventListener('submit', e => {
       e.preventDefault(); const state = getState();
       try {
@@ -220,13 +250,78 @@
     });
     function renderSamples() {
       const items = getState().samples; $('sampleRecords').replaceChildren();
+      const summary = C.summarizeSamples(items);
+      const compSection = $('sampleComparisonSection'), compRows = $('sampleComparisonRows'), labelFilter = $('sampleLabelFilter');
+      if (compSection && compRows) {
+        compRows.replaceChildren();
+        compSection.hidden = !summary.length;
+        for (const group of summary) {
+          const tr = node('tr');
+          const nameCell = node('th'); nameCell.scope = 'row'; nameCell.append(node('bdi', '', group.label));
+          tr.append(nameCell, node('td', '', group.entries), node('td', '', group.reviewed), node('td', '', group.relevant), node('td', 'compare-pct', group.percentage + '%'));
+          compRows.append(tr);
+        }
+      }
+      let selectedLabel = '';
+      if (labelFilter) {
+        const prev = labelFilter.value;
+        const allOpt = node('option', '', 'كل التجارب'); allOpt.value = '';
+        labelFilter.replaceChildren(allOpt, ...summary.map(g => { const o = node('option', '', `${g.label} (${g.entries})`); o.value = g.key; return o; }));
+        selectedLabel = summary.some(g => g.key === prev) ? prev : '';
+        labelFilter.value = selectedLabel;
+      }
+      if ($('exportSamples')) $('exportSamples').disabled = !items.length;
+      if ($('exportSamplesSummary')) $('exportSamplesSummary').disabled = !summary.length;
       if (!items.length) { $('sampleRecords').append(node('p', 'body-copy', 'لم تسجّل مراجعة نتائج بعد. ابدأ البحث ثم افتح «تسجيل فائدة عينة راجعتها» في لوحة الجولة.')); return; }
-      for (const sample of [...items].reverse()) {
+      const visibleItems = selectedLabel ? items.filter(s => C.key(s.label) === selectedLabel) : items;
+      for (const sample of [...visibleItems].reverse()) {
         const row = node('article', 'sample-record'), percentage = Math.round(sample.relevant / sample.reviewed * 100); row.append(node('h3', '', sample.label), node('strong', '', `${sample.relevant} من ${sample.reviewed} ملائم · ${percentage}% من العينة المراجعة`), node('p', '', sample.note), node('small', '', new Intl.DateTimeFormat('ar-SA-u-ca-gregory', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(sample.recordedAt))));
         const details = node('details'), title = node('summary', '', 'استعلام العينة'); const query = node('p', 'sample-query', sample.query); query.dir = 'ltr'; details.append(title, query, link('افتح البحث نفسه في X', C.searchUrl(sample.query, sample.type))); row.append(details, button('حذف السجل', () => confirmAction('حذف سجل مراجعة', 'سيُحذف سجل هذه العينة فقط. يمكنك تصدير السجل كاملًا أولًا.', () => { getState().samples = getState().samples.filter(s => s.id !== sample.id); scheduleSave(); renderSamples(); }), 'text-button')); $('sampleRecords').append(row);
       }
     }
+    if ($('sampleLabelFilter')) $('sampleLabelFilter').addEventListener('change', renderSamples);
     $('exportSamples').addEventListener('click', () => { const samples = getState().samples; if (!samples.length) return toast('لا توجد مراجعات للتصدير.'); const rows = [['التجربة', 'راجعت', 'ملائم', 'نسبة العينة', 'التاريخ', 'الاستعلام', 'الملاحظات'], ...samples.map(s => [s.label, s.reviewed, s.relevant, Math.round(s.relevant / s.reviewed * 100) + '%', s.recordedAt, s.query, s.note])]; textDownload('\ufeff' + rows.map(row => row.map(C.csvCell).join(',')).join('\r\n'), 'research-hunter-reviewed-samples.csv', 'text/csv;charset=utf-8'); });
+    if ($('exportSamplesSummary')) $('exportSamplesSummary').addEventListener('click', () => { const summary = C.summarizeSamples(getState().samples); if (!summary.length) return toast('لا توجد تجارب للتصدير.'); textDownload(C.samplesSummaryCSV(summary), 'research-hunter-experiment-comparison.csv', 'text/csv;charset=utf-8'); });
+
+    function renderOverlap() {
+      const report = C.analyzeLibraryOverlap(getState().categories);
+      $('overlapStats').replaceChildren(...[
+        [report.overlaps.length, 'مصطلحات متداخلة'],
+        [report.conflictCount, 'تعارضات استبعاد'],
+        [report.uniqueActiveTerms, 'عبارة فريدة فعّالة'],
+        [report.alertTermsCount, 'عبارات بتحذيرات']
+      ].map(([value, caption]) => { const s = node('div'); s.append(node('strong', '', value), node('span', '', caption)); return s; }));
+      const mode = $('overlapFilter').value;
+      const items = mode === 'conflicts' ? report.overlaps.filter(x => x.conflict) : report.overlaps;
+      const holder = $('overlapList'); holder.replaceChildren();
+      if (!items.length) {
+        const empty = node('div', 'empty-state');
+        empty.append(node('h3', '', mode === 'conflicts' ? 'لا توجد تعارضات استبعاد' : 'ممتاز! لا توجد مصطلحات مكررة بين تصنيفاتك'), node('p', '', mode === 'conflicts' ? 'جميع المصطلحات المشتركة متسقة في حالة الاستبعاد أو التفعيل.' : 'كل مصطلح في مكتبتك ينتمي لتصنيف واحد حاليًا.'));
+        holder.append(empty);
+        return;
+      }
+      const statusLabel = s => ({ reviewed: 'ملائم', excluded: 'مستبعد', candidate: 'مقترح' }[s] || 'مقترح');
+      for (const item of items) {
+        const card = node('article', 'overlap-card' + (item.conflict ? ' overlap-conflict' : ''));
+        const head = node('div', 'overlap-head'), termEl = node('bdi', 'overlap-term', item.term);
+        head.append(termEl);
+        if (item.conflict) head.append(node('span', 'pill warning-pill', 'تعارض استبعاد'));
+        else head.append(node('span', 'pill', `في ${item.categories.length} تصنيفات`));
+        const list = node('div', 'overlap-cats');
+        for (const catEntry of item.categories) {
+          const row = node('div', 'overlap-cat-row');
+          const statusBadge = node('span', 'status-tag status-' + catEntry.status, statusLabel(catEntry.status));
+          const jump = button('مراجعة', () => { closeDialog('overlapDialog'); review(catEntry.id, item.key); }, 'text-button');
+          jump.setAttribute('aria-label', `مراجعة ${item.term} في ${catEntry.title}`);
+          row.append(node('span', 'overlap-cat-name', catEntry.title), statusBadge, jump);
+          list.append(row);
+        }
+        card.append(head, list);
+        holder.append(card);
+      }
+    }
+    if ($('openOverlap')) $('openOverlap').addEventListener('click', () => { $('overlapFilter').value = 'all'; renderOverlap(); showDialog('overlapDialog'); });
+    if ($('overlapFilter')) $('overlapFilter').addEventListener('change', renderOverlap);
 
     function renderDraftEvidence() {
       const d = getState().draft, holder = $('draftEvidenceBody'); holder.replaceChildren(); $('draftEvidence').hidden = !(d.evidence.length || d.accounts.length || d.exclusions.length);

@@ -6,10 +6,10 @@
   const langLabel = lang => ({ ar: 'العربية', en: 'الإنجليزية', both: 'لغتان', mixed: 'لغتان' }[lang] || 'غير محددة');
   const storage = new C.StorageManager({ getItem: k => window.localStorage.getItem(k), setItem: (k, v) => window.localStorage.setItem(k, v) });
   const seed = window.HunterDefaults;
-  const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: [] });
-  const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, stagedFiles = [], importResult = null, importBusy = false;
+  const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, savedSessions: [], samples: [] });
+  const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, confirmToken = 0, stagedFiles = [], importResult = null, importBusy = false;
   const xTab = new C.XTab(window.open.bind(window));
-  let researchUI = null, planTimer, sessionPlanSource = null, sessionPlan = null, renderedSession = null, renderedIndex = -1, renderedOpenedKey = '';
+  let researchUI = null, planTimer, sessionPlanSource = null, sessionPlan = null, renderedSession = null, renderedIndex = -1, renderedOpenedKey = '', resumedSessionName = '';
   let lastValidOptions = C.normalizeOptions(state.options);
   const dialogOpeners = new Map();
   function toast(message) { $('toastAnnouncement').textContent = message; $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
@@ -40,7 +40,7 @@
     if (!force && id === 'reviewDialog' && researchUI?.confirmCloseReview?.()) return;
     $(id).close(); if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open');
   }
-  function confirmAction(title, text, action, details = '') { $('confirmTitle').textContent = title; $('confirmText').textContent = text; $('restoreDetails').textContent = details; $('restoreDetails').hidden = !details; pendingConfirm = action; showDialog('confirmDialog'); }
+  function confirmAction(title, text, action, details = '') { $('confirmTitle').textContent = title; $('confirmText').textContent = text; $('restoreDetails').textContent = details; $('restoreDetails').hidden = !details; pendingConfirm = { token: ++confirmToken, action }; showDialog('confirmDialog'); }
   function download(data, filename) { const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }), url = URL.createObjectURL(blob), a = node('a'); a.href = url; a.download = filename; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 15000); }
   const dateStamp = () => new Date().toISOString().slice(0, 10);
   function backupForDownload() {
@@ -103,12 +103,29 @@
   }
   function schedulePlan() { clearTimeout(planTimer); renderFilterIndicators(); planTimer = setTimeout(renderPlan, 200); }
   function savedPlan() { if (sessionPlanSource !== state.session) { sessionPlan = state.session ? C.buildPlan(state.session.terms, state.session.options) : null; sessionPlanSource = state.session; } return sessionPlan; }
+  function sessionOptionsSummary(opts) {
+    const parts = [];
+    if (opts.language && opts.language !== 'all') parts.push('اللغة: ' + langLabel(opts.language));
+    if (opts.accounts?.length) parts.push(`${opts.accounts.length} حساب`);
+    if (opts.since || opts.until) parts.push(`${opts.since || '…'} إلى ${opts.until || '…'}`);
+    if (opts.match === 'words') parts.push('مطابقة الكلمات');
+    if (opts.noReplies) parts.push('بلا ردود');
+    if (opts.noReposts) parts.push('بلا إعادة نشر');
+    return parts.join(' · ');
+  }
   function renderSession(currentPlan = null) {
     const session = state.session; $('activeSession').hidden = !session;
-    $('sessionCaption').textContent = session ? 'جولتك محفوظة؛ تابع من حيث توقفت' : 'جاهز للاكتشاف؟';
+    $('sessionCaption').textContent = session ? (resumedSessionName ? `تعمل على: ${resumedSessionName}` : 'جولتك محفوظة؛ تابع من حيث توقفت') : 'جاهز للاكتشاف؟';
     if (!session) { renderedSession = null; renderedIndex = -1; renderedOpenedKey = ''; return; }
     const plan = savedPlan();
-    $('sessionStaleNotice').hidden = !(currentPlan && C.isSessionStale(session, currentPlan));
+    const filterSummary = sessionOptionsSummary(plan.options);
+    $('sessionContextMeta').textContent = `${resumedSessionName ? `جلسة مستأنفة «${resumedSessionName}»` : 'الجلسة الحالية'}: ${plan.terms.length} عبارة · ${plan.batches.length} دفعات${filterSummary ? ' · ' + filterSummary : ''}`;
+    const stale = !!(currentPlan && C.isSessionStale(session, currentPlan));
+    $('sessionStaleNotice').hidden = !stale;
+    if (stale) {
+      $('sessionStaleNotice').textContent = `الجدول يعرض الجلسة ${resumedSessionName ? `المستأنفة «${resumedSessionName}»` : 'المجهّزة'} كما حُفظت (${plan.terms.length} عبارة · ${plan.batches.length} دفعات)، بينما اختياراتك الحالية أعلى الصفحة تُنتج (${currentPlan.terms.length} عبارة · ${currentPlan.batches.length} دفعات). اضغط «تجهيز جولات جديدة» لتحديث الجدول باختياراتك الحالية.`;
+    }
+    $('applySessionFilters').hidden = !(currentPlan && JSON.stringify(session.options) !== JSON.stringify(currentPlan.options));
     $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked);
     const openedKey = (session.opened || []).join(',');
     if (renderedSession === session) { if (renderedIndex !== session.index || renderedOpenedKey !== openedKey) renderSessionPosition(plan); return; }
@@ -155,7 +172,7 @@
     }
     renderSessionPosition(plan); saveNow();
   }
-  function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); saveNow(); toast('الجولات جاهزة في الجدول. افتح أي جولة، أو استخدم Ctrl مع النقر لفتحها في الخلفية.'); } catch (e) { toast(e.message); } }
+  function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); resumedSessionName = ''; state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); saveNow(); toast('الجولات جاهزة في الجدول. افتح أي جولة، أو استخدم Ctrl مع النقر لفتحها في الخلفية.'); } catch (e) { toast(e.message); } }
   function duplicateCategory(id) {
     if (state.categories.length >= C.LIMIT) return toast(`بلغت المكتبة الحد الأقصى (${C.LIMIT} تصنيفًا). احذف أو ادمج تصنيفًا أولًا.`);
     const source = state.categories.find(c => c.id === id); if (!source) return;
@@ -302,32 +319,109 @@
       importResult = categories; $('importPreview').textContent = `النتيجة: ${categories.length} تصنيفًا من مكتبتك و${stagedFiles.length} ملف/ملفات. دُمج ${merged} تصنيفًا، وأُزيل ${duplicates} تكرارًا، وتغيّر ${renamed} اسمًا. تحفظ ملفات Web المراجعات والقوالب. عند الدمج تُحفظ مراجعات وقوالب التصنيف الموجود، وتضاف بيانات المصطلحات الجديدة.`; $('applyImport').disabled = false;
     } catch (e) { $('importError').textContent = e.message; $('importError').hidden = false; $('importPreview').textContent = 'تعذّر تطبيق هذا الدمج. قلّل الملفات أو اختر دمج الأسماء المتشابهة.'; }
   }
-  $('importFiles').addEventListener('change', async e => {
-    const files = [...e.target.files]; e.target.value = ''; if (stagedFiles.length + files.length > 20) return toast('اختر حتى 20 ملفًا في عملية الدمج الواحدة.');
+  function renderSavedSessionsBadge() {
+    const count = (state.savedSessions || []).length;
+    $('savedSessionsLabel').textContent = `الجلسات المحفوظة (${count})`;
+  }
+  function renderSavedSessionsList() {
+    const holder = $('savedSessionsList'); holder.replaceChildren();
+    const list = state.savedSessions || [];
+    if (!list.length) {
+      const empty = node('div', 'empty-state');
+      empty.append(node('h3', '', 'لا توجد جلسات محفوظة بعد'), node('p', '', 'جهّز جولات البحث ثم اضغط «حفظ هذه الجلسة بالاسم» للاحتفاظ بتقدمك وتبديل المسارات بسهولة.'));
+      holder.append(empty);
+      return;
+    }
+    const fmt = new Intl.DateTimeFormat('ar-SA-u-ca-gregory', { dateStyle: 'medium', timeStyle: 'short' });
+    for (const s of [...list].reverse()) {
+      const card = node('article', 'saved-session-card'), plan = C.buildPlan(s.terms, s.options), openedCount = (s.opened || []).length;
+      const head = node('div', 'saved-session-head'), title = node('h3', '', s.name); title.dir = 'auto';
+      head.append(title, node('span', 'pill', `${plan.batches.length} جولات`));
+      const meta = node('p', 'saved-session-meta', `المحددة: ${s.index + 1} من ${plan.batches.length} · فُتحت ${openedCount} · ${s.terms.length} عبارة`);
+      const stamp = node('small', 'saved-session-date', 'حُفظت في: ' + fmt.format(new Date(s.savedAt)));
+      const actions = node('div', 'actions');
+      const resumeBtn = node('button', 'button primary small', 'استئناف الجلسة'); resumeBtn.type = 'button';
+      resumeBtn.addEventListener('click', () => {
+        resumedSessionName = s.name;
+        state.session = { terms: C.clone(s.terms), options: C.clone(s.options), index: s.index, startedAt: s.startedAt || '', ...(s.opened?.length ? { opened: [...s.opened] } : {}) };
+        closeDialog('sessionsDialog'); renderPlan(); saveNow();
+        toast(`استُؤنفت الجلسة «${s.name}» (${plan.batches.length} دفعات). بقيت اختياراتك بالأعلى دون تغيير.`);
+      });
+      const updateBtn = node('button', 'button ghost small', 'تحديث بالحالية'); updateBtn.type = 'button'; updateBtn.disabled = !state.session;
+      updateBtn.addEventListener('click', () => {
+        if (!state.session) return;
+        const updated = C.validateSavedSession({ ...C.clone(state.session), id: s.id, name: s.name, savedAt: new Date().toISOString() });
+        state.savedSessions = C.validateSavedSessions(state.savedSessions.map(x => x.id === s.id ? updated : x));
+        renderSavedSessionsBadge(); renderSavedSessionsList(); saveNow();
+        toast(`حُدّثت الجلسة «${s.name}» بالتقدم الحالي.`);
+      });
+      const delBtn = node('button', 'text-button danger-text', 'حذف'); delBtn.type = 'button';
+      delBtn.addEventListener('click', () => confirmAction('حذف جلسة محفوظة', `سيُحذف سجل الجلسة «${s.name}» فقط؛ تبقى تصنيفاتك في المكتبة.`, () => {
+        state.savedSessions = state.savedSessions.filter(x => x.id !== s.id);
+        renderSavedSessionsBadge(); renderSavedSessionsList(); saveNow(); toast('حُذفت الجلسة المحفوظة.');
+      }));
+      actions.append(resumeBtn, updateBtn, delBtn);
+      card.append(head, meta, stamp, actions);
+      holder.append(card);
+    }
+  }
+  function openSaveSessionDialog() {
+    if (!state.session) return toast('جهّز جولات البحث أولًا قبل حفظ الجلسة.');
+    const chosenTitles = state.categories.filter(c => state.selected.includes(c.id)).map(c => c.title).slice(0, 2);
+    const defaultName = (chosenTitles.length ? chosenTitles.join(' + ') : `جلسة ${dateStamp()}`).slice(0, 65);
+    $('sessionNameInput').value = defaultName; $('saveSessionError').hidden = true;
+    showDialog('saveSessionDialog'); $('sessionNameInput').focus(); $('sessionNameInput').select();
+  }
+  $('saveSessionForm').addEventListener('submit', e => {
+    e.preventDefault();
+    if (!state.session) return closeDialog('saveSessionDialog');
+    try {
+      const name = $('sessionNameInput').value.trim();
+      const list = state.savedSessions || [];
+      const existing = list.find(s => C.key(s.name) === C.key(name));
+      if (!existing && list.length >= C.SAVED_SESSIONS_LIMIT) throw Error(`بلغت الحد الأقصى (${C.SAVED_SESSIONS_LIMIT} جلسة محفوظة). احذف جلسة قديمة أو استخدم اسم جلسة قائمة لتحديثها.`);
+      const record = C.validateSavedSession({ ...C.clone(state.session), id: existing ? existing.id : C.id(), name, savedAt: new Date().toISOString() });
+      const next = existing ? list.map(s => s.id === existing.id ? record : s) : [...list, record];
+      state.savedSessions = C.validateSavedSessions(next);
+      closeDialog('saveSessionDialog'); renderSavedSessionsBadge(); saveNow();
+      toast(existing ? `حُدّثت الجلسة «${record.name}».` : `حُفظت الجلسة «${record.name}».`);
+    } catch (error) { $('saveSessionError').textContent = error.message; $('saveSessionError').hidden = false; }
+  });
+  async function stageIncomingFiles(fileList) {
+    const files = [...fileList]; if (!files.length) return;
+    if (stagedFiles.length + files.length > 20) return toast('اختر حتى 20 ملفًا في عملية الدمج الواحدة.');
     importBusy = true; $('importFiles').disabled = true; updateImportPreview();
     const incoming = await Promise.all(files.map(async file => { try { if (file.size > C.MAX_FILE_BYTES) throw Error('أكبر من 8 ميغابايت'); const archive = C.parseArchive(await file.text()); return { name: file.name, categories: archive.categories }; } catch (error) { return { name: file.name, error: error.message }; } }));
     stagedFiles.push(...incoming); importBusy = false; $('importFiles').disabled = false; updateImportPreview();
-  });
+  }
+  $('importFiles').addEventListener('change', async e => { const files = [...e.target.files]; e.target.value = ''; await stageIncomingFiles(files); });
+  const dropZone = $('importDropZone');
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', async e => { e.preventDefault(); dropZone.classList.remove('drag-over'); if (e.dataTransfer?.files?.length) await stageIncomingFiles(e.dataTransfer.files); });
   $('applyImport').addEventListener('click', () => { if (!importResult || importBusy) return; state.categories = C.clone(importResult); closeDialog('importDialog'); changed('أُضيفت الملفات إلى مكتبتك. لم تُعدّل الملفات الأصلية.'); });
   $('restoreFile').addEventListener('change', async e => {
     const file = e.target.files[0]; e.target.value = ''; if (!file) return;
     try {
       if (file.size > C.MAX_FILE_BYTES) throw Error('حجم النسخة أكبر من 8 ميغابايت.'); const archive = C.parseArchive(await file.text());
       if (archive.format !== 'research-hunter-web-backup') throw Error('هذا ملف تصنيفات. استخدم استيراد ودمج لإضافته، أو اختر نسخة Web كاملة.');
+      const savedCount = (archive.state.savedSessions || []).length;
       confirmAction('استعادة نسخة Web كاملة', 'ستستبدل الاستعادة المكتبة والمسودة وإعدادات البحث الحالية. سنجهّز نسخة من حالتك الحالية للتنزيل قبل الاستبدال.', () => {
         download(backupForDownload(), `research-hunter-web-before-restore-${dateStamp()}.json`);
-        state = C.clone(archive.state); lastValidOptions = C.normalizeOptions(state.options); writeBlocked = false; warn(''); syncSearchFields(); syncDraft(); changed('استُعيدت النسخة الكاملة.'); saveNow();
-      }, `${archive.categories.length} تصنيفًا · ${archive.state.session ? 'تتضمن جولة بحث محفوظة' : 'لا توجد جولة بحث'} · ${archive.state.draft.topic || 'مسودة فارغة'}`);
+        resumedSessionName = '';
+        state = C.clone(archive.state); lastValidOptions = C.normalizeOptions(state.options); writeBlocked = false; warn(''); syncSearchFields(); syncDraft(); renderSavedSessionsBadge(); changed('استُعيدت النسخة الكاملة.'); saveNow();
+      }, `${archive.categories.length} تصنيفًا · ${archive.state.session ? 'تتضمن جولة بحث نشطة' : 'لا توجد جولة نشطة'}${savedCount ? ` · ${savedCount} جلسات محفوظة` : ''} · ${archive.state.draft.topic || 'مسودة فارغة'}`);
     } catch (error) { toast(error.message); }
   });
   for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => closeDialog(button.dataset.close));
   for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => {
-    if (dialog.id === 'confirmDialog') pendingConfirm = null;
+    // Only clear pendingConfirm if confirmDialog actually remains closed (not re-opened synchronously).
+    if (dialog.id === 'confirmDialog' && !dialog.open) pendingConfirm = null;
     if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open');
     const opener = dialogOpeners.get(dialog.id); dialogOpeners.delete(dialog.id);
     if (opener && opener.isConnected && typeof opener.focus === 'function' && !opener.closest('[hidden]')) opener.focus();
   });
-  $('confirmAction').addEventListener('click', () => { const action = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); try { if (action) action(); } catch (error) { toast(error.message || 'تعذر إتمام العملية. لم نتابع الاستبدال.'); } });
+  $('confirmAction').addEventListener('click', () => { const entry = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); try { if (entry?.action) entry.action(); } catch (error) { toast(error.message || 'تعذر إتمام العملية. لم نتابع الاستبدال.'); } });
   for (const [field, name] of Object.entries(searchFields)) $(field).addEventListener('change', () => { state.options[name] = $(field).type === 'checkbox' ? $(field).checked : name === 'batchSize' ? Number($(field).value) : $(field).value; renderPlan(); scheduleSave(); });
   // Text filters update without waiting for blur.
   for (const field of ['account', 'searchExclude', 'requiredTerms']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; schedulePlan(); scheduleSave(); });
@@ -344,6 +438,11 @@
   $('clearOpenedRounds').addEventListener('click', () => { if (!state.session) return; delete state.session.opened; renderSessionPosition(savedPlan()); saveNow(); toast('مُسحت علامات فتح الجولات.'); });
   $('copyQuery').addEventListener('click', () => copy($('queryPreview').value));
   $('copyRoundUrl').addEventListener('click', () => { if (!state.session) return; copy(savedPlan().batches[state.session.index].url); });
+  $('applySessionFilters').addEventListener('click', () => {
+    if (!state.session) return;
+    state.options = C.clone(state.session.options); lastValidOptions = C.normalizeOptions(state.options);
+    syncSearchFields(); renderPlan(); scheduleSave(); toast('نُسخت مرشحات الجلسة إلى خيارات البحث.');
+  });
   $('showRoundTerms').addEventListener('change', () => $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked));
   $('addCategory').addEventListener('click', () => editCategory());
   for (const name of ['quickBackup', 'downloadBackup']) $(name).addEventListener('click', exportBackup);
@@ -364,9 +463,40 @@
   });
   $('newDraft').addEventListener('click', () => { const reset = () => { state.draft = C.defaultDraft(); syncDraft(); $('topic').dataset.previous = ''; scheduleSave(); toast('بدأت مسودة جديدة.'); }; if (state.draft.topic || state.draft.reply || C.SECTIONS.some(s => state.draft.groups[s.key].terms)) confirmAction('مسودة جديدة', 'ستُمسح المسودة الحالية. تبقى التصنيفات المضافة في المكتبة.', reset); else reset(); });
   $('saveGenerated').addEventListener('click', () => saveGenerated(false)); $('searchGenerated').addEventListener('click', () => saveGenerated(true)); $('reviewGenerated').addEventListener('click', () => saveGenerated(false, true));
+  const themeLabels = { auto: 'تلقائي', light: 'فاتح', dark: 'داكن' };
+  function syncThemeButton() {
+    if (!window.HunterTheme) return;
+    const mode = window.HunterTheme.get(), effective = window.HunterTheme.resolved(mode);
+    $('themeLabel').textContent = themeLabels[mode] || 'تلقائي';
+    $('themeToggle').setAttribute('aria-label', `المظهر: ${themeLabels[mode]} (${effective === 'dark' ? 'داكن حاليًا' : 'فاتح حاليًا'})؛ اضغط للتبديل`);
+  }
+  $('themeToggle').addEventListener('click', () => {
+    if (!window.HunterTheme) return;
+    const next = window.HunterTheme.cycle();
+    syncThemeButton();
+    toast(`تم التبديل إلى المظهر: ${themeLabels[next]}.`);
+  });
+  window.HunterTheme?.subscribe(syncThemeButton);
+  $('saveNamedSession').addEventListener('click', openSaveSessionDialog);
+  $('openSavedSessions').addEventListener('click', () => { renderSavedSessionsList(); showDialog('sessionsDialog'); });
+  $('openShortcuts').addEventListener('click', () => showDialog('shortcutsDialog'));
+  document.addEventListener('keydown', e => {
+    const anyDialog = document.querySelector('dialog[open]');
+    if ($('reviewDialog').open && !$('confirmDialog').open) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); $('termReviewForm').requestSubmit(); return; }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowLeft') { e.preventDefault(); if (!$('reviewNext').disabled) $('reviewNext').click(); return; }
+      if (e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowRight') { e.preventDefault(); if (!$('reviewPrevious').disabled) $('reviewPrevious').click(); return; }
+    }
+    if (anyDialog) return;
+    const tag = document.activeElement?.tagName, editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || document.activeElement?.isContentEditable;
+    if (e.altKey && !e.ctrlKey && !e.metaKey && ['1', '2', '3', '4'].includes(e.key)) {
+      e.preventDefault(); location.hash = ['search', 'library', 'generator', 'backup'][Number(e.key) - 1]; return;
+    }
+    if (!editable && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === '?') { e.preventDefault(); showDialog('shortcutsDialog'); }
+  });
   window.addEventListener('hashchange', () => { route(); window.scrollTo({ top: 0 }); }); window.addEventListener('pagehide', saveNow); document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
   window.addEventListener('storage', e => { if (e.key === storage.name || e.key === null) { writeBlocked = true; warn('تغيّرت المكتبة في تبويب آخر. أوقفنا الحفظ هنا لتجنّب الكتابة فوقها. نزّل نسختك الحالية، ثم أعد تحميل الصفحة.'); saveNow(); } });
-  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, getLastValidOptions: () => lastValidOptions, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
-  syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); renderStorageUsage(); route();
+  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, getLastValidOptions: () => lastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
+  syncThemeButton(); syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); renderSavedSessionsBadge(); renderStorageUsage(); route();
   if (loaded.warning) warn(loaded.warning); if (loaded.blocked) saveNow(); else if (!loaded.state) saveNow();
 })();

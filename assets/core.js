@@ -4,7 +4,7 @@
   else root.HunterCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const LIMIT = 50, MAX_FILE_BYTES = 8 * 1024 * 1024;
+  const LIMIT = 50, SAVED_SESSIONS_LIMIT = 20, MAX_FILE_BYTES = 8 * 1024 * 1024;
   const SECTIONS = [
     { key: 'AR_PHRASES', label: 'عبارات عربية', suffix: 'عربي | عبارات', language: 'ar', symbol: 'ع', hashtag: false },
     { key: 'AR_HASHTAGS', label: 'هاشتاقات عربية', suffix: 'عربي | هاشتاقات', language: 'ar', symbol: '#', hashtag: true },
@@ -334,6 +334,22 @@
     }
     return { terms: plan.terms, options: plan.options, index: value.index, startedAt: typeof value.startedAt === 'string' ? value.startedAt : '', ...(opened.length ? { opened } : {}) };
   }
+  function validateSavedSession(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('بيانات الجلسة المحفوظة غير صالحة.');
+    if (typeof value.name !== 'string' || !value.name.trim() || value.name.trim().length > 65) throw Error('اسم الجلسة المحفوظة مطلوب، وبحد أقصى 65 حرفًا.');
+    if (value.id != null && (typeof value.id !== 'string' || !/^[a-z0-9-]{1,90}$/.test(value.id))) throw Error('معرّف الجلسة المحفوظة غير صالح.');
+    if (value.savedAt != null && (typeof value.savedAt !== 'string' || !Number.isFinite(Date.parse(value.savedAt)))) throw Error('تاريخ حفظ الجلسة غير صالح.');
+    const session = validateSession(value);
+    if (!session) throw Error('بيانات الجلسة المحفوظة غير صالحة.');
+    return { id: value.id || id(), name: value.name.trim(), ...session, savedAt: value.savedAt ? new Date(value.savedAt).toISOString() : new Date().toISOString() };
+  }
+  function validateSavedSessions(value) {
+    if (value == null) return [];
+    if (!Array.isArray(value) || value.length > SAVED_SESSIONS_LIMIT) throw Error(`يمكن حفظ حتى ${SAVED_SESSIONS_LIMIT} جلسة بحث.`);
+    const result = value.map(validateSavedSession);
+    if (new Set(result.map(s => s.id)).size !== result.length) throw Error('يوجد معرّف جلسة محفوظة مكرر.');
+    return result;
+  }
   function validateSamples(value) {
     if (value != null && (!Array.isArray(value) || value.length > 100)) throw Error('سجل مراجعات النتائج يجب ألا يتجاوز 100 عينة.');
     return Array.isArray(value) ? value.map(validateSample) : [];
@@ -343,8 +359,8 @@
     const categories = validateCategories(state.categories, true), ids = new Set(categories.map(c => c.id));
     const selected = Array.isArray(state.selected) ? [...new Set(state.selected.filter(x => ids.has(x)))] : [];
     const exportSelected = Array.isArray(state.exportSelected) ? [...new Set(state.exportSelected.filter(x => ids.has(x)))] : [];
-    const options = normalizeOptions(state.options), session = validateSession(state.session), samples = validateSamples(state.samples);
-    return { version: 1, categories, selected, exportSelected, options, extra: typeof state.extra === 'string' ? state.extra.slice(0, 150000) : '', draft: validateDraft(state.draft), session, samples };
+    const options = normalizeOptions(state.options), session = validateSession(state.session), savedSessions = validateSavedSessions(state.savedSessions), samples = validateSamples(state.samples);
+    return { version: 1, categories, selected, exportSelected, options, extra: typeof state.extra === 'string' ? state.extra.slice(0, 150000) : '', draft: validateDraft(state.draft), session, savedSessions, samples };
   }
   // Only local reads use this repair path. Imports and normal saves stay strict.
   function repairStoredState(raw) {
@@ -360,6 +376,15 @@
         catch { repaired.session = null; repairs.push('الجولة المحفوظة'); }
       } else { repaired.session = null; repairs.push('الجولة المحفوظة'); }
     }
+    if (Array.isArray(raw.savedSessions) && raw.savedSessions.length <= SAVED_SESSIONS_LIMIT) {
+      repaired.savedSessions = []; let invalid = 0; const seenIds = new Set();
+      for (const item of raw.savedSessions) try {
+        const valid = validateSavedSession(item);
+        if (seenIds.has(valid.id)) { invalid++; continue; }
+        seenIds.add(valid.id); repaired.savedSessions.push(valid);
+      } catch { invalid++; }
+      if (invalid) repairs.push(`${invalid} من الجلسات المحفوظة`);
+    } else component('savedSessions', 'الجلسات المحفوظة', validateSavedSessions, () => []);
     try { repaired.draft = validateDraft(raw.draft); }
     catch {
       const d = raw.draft && typeof raw.draft === 'object' && !Array.isArray(raw.draft) ? raw.draft : {};
@@ -377,6 +402,63 @@
       if (invalid) repairs.push(`${invalid} من سجلات العينات`);
     } else component('samples', 'سجل العينات', validateSamples, () => []);
     return { state: validateState(repaired), repairs };
+  }
+  function bulkUpdateReviews(category, targetTerms, status, checkedAt = '') {
+    if (!['candidate', 'reviewed', 'excluded'].includes(status)) throw Error('حالة المراجعة غير صالحة.');
+    if (checkedAt && !validDate(checkedAt)) throw Error('تاريخ المراجعة غير صالح.');
+    const targetKeys = new Set((targetTerms || []).map(key));
+    const existing = new Map((category.reviews || []).map(r => [key(r.term), r]));
+    let updatedCount = 0;
+    const reviews = [];
+    for (const term of category.terms) {
+      const k = key(term), prev = existing.get(k);
+      if (targetKeys.has(k)) {
+        const nextCheckedAt = status === 'candidate' ? (prev?.checkedAt || '') : (prev?.checkedAt || checkedAt);
+        const next = { term, status, sourceUrl: prev?.sourceUrl || '', checkedAt: nextCheckedAt, note: prev?.note || '' };
+        if (!prev || prev.status !== status || prev.checkedAt !== nextCheckedAt) updatedCount++;
+        if (next.status !== 'candidate' || next.sourceUrl || next.checkedAt || next.note) reviews.push(next);
+      } else if (prev) {
+        reviews.push(prev);
+      }
+    }
+    return { category: validateCategory({ ...category, reviews }), updatedCount };
+  }
+  function analyzeLibraryOverlap(categories) {
+    const map = new Map(), activeKeys = new Set(), alertKeys = new Set();
+    let totalRawTerms = 0;
+    for (const c of categories) {
+      const reviews = new Map((c.reviews || []).map(r => [key(r.term), r]));
+      totalRawTerms += c.terms.length;
+      for (const term of c.terms) {
+        const k = key(term), status = reviews.get(k)?.status || 'candidate';
+        if (status !== 'excluded') activeKeys.add(k);
+        if (inspectTerm(term).length) alertKeys.add(k);
+        if (!map.has(k)) map.set(k, { term, key: k, categories: [] });
+        map.get(k).categories.push({ id: c.id, title: c.title, status });
+      }
+    }
+    const overlaps = [...map.values()].filter(item => item.categories.length > 1).map(item => {
+      const hasExcluded = item.categories.some(x => x.status === 'excluded');
+      const hasActive = item.categories.some(x => x.status !== 'excluded');
+      return { ...item, conflict: hasExcluded && hasActive };
+    }).sort((a, b) => Number(b.conflict) - Number(a.conflict) || b.categories.length - a.categories.length);
+    return { totalRawTerms, uniqueTerms: map.size, uniqueActiveTerms: activeKeys.size, overlaps, conflictCount: overlaps.filter(x => x.conflict).length, alertTermsCount: alertKeys.size };
+  }
+  function summarizeSamples(samples) {
+    const groups = new Map();
+    for (const s of samples || []) {
+      const k = key(s.label);
+      if (!groups.has(k)) groups.set(k, { label: s.label, key: k, entries: 0, reviewed: 0, relevant: 0, latestAt: s.recordedAt || '' });
+      const g = groups.get(k);
+      g.entries++;
+      g.reviewed += s.reviewed;
+      g.relevant += s.relevant;
+      if (s.recordedAt && (!g.latestAt || s.recordedAt > g.latestAt)) g.latestAt = s.recordedAt;
+    }
+    return [...groups.values()].map(g => ({ ...g, percentage: Math.round((g.relevant / g.reviewed) * 100) })).sort((a, b) => b.latestAt.localeCompare(a.latestAt));
+  }
+  function samplesSummaryCSV(summary) {
+    return '\ufeff' + [['التجربة', 'عدد العينات', 'إجمالي المراجع', 'إجمالي الملائم', 'النسبة المجمّعة', 'آخر تسجيل'], ...summary.map(g => [g.label, g.entries, g.reviewed, g.relevant, g.percentage + '%', g.latestAt])].map(row => row.map(csvCell).join(',')).join('\r\n');
   }
   function categoryArchive(categories, selectedIds) {
     const wanted = selectedIds === undefined ? null : new Set(selectedIds);
@@ -475,5 +557,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, csvCell, planCSV, StorageManager, XTab };
+  return { LIMIT, SAVED_SESSIONS_LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, bulkUpdateReviews, analyzeLibraryOverlap, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateSavedSession, validateSavedSessions, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, summarizeSamples, samplesSummaryCSV, csvCell, planCSV, StorageManager, XTab };
 });
