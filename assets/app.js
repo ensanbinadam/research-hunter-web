@@ -9,17 +9,17 @@
   const freshState = () => ({ version: 1, categories: C.clone(seed), selected: seed.slice(0, 2).map(c => c.id), exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: [] });
   const loaded = storage.read(); let state = loaded.state || freshState(), writeBlocked = !!loaded.blocked, saveTimer, toastTimer, editingId = null, pendingConfirm = null, stagedFiles = [], importResult = null, importBusy = false;
   const xTab = new C.XTab(window.open.bind(window));
-  let researchUI = null;
+  let researchUI = null, planTimer, sessionPlanSource = null, sessionPlan = null, renderedSession = null, renderedIndex = -1;
   let lastValidOptions = C.normalizeOptions(state.options);
-  function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
-  function warn(message) { $('storageWarning').textContent = message; $('storageWarning').hidden = !message; }
+  function toast(message) { $('toastAnnouncement').textContent = message; $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000); }
+  function warn(message) { $('storageAnnouncement').textContent = message; $('storageWarning').textContent = message; $('storageWarning').hidden = !message; }
   function saveNow() {
     clearTimeout(saveTimer);
     if (writeBlocked) { $('saveStatus').classList.add('failed'); $('saveStatus').lastElementChild.textContent = 'الحفظ متوقف · نزّل نسخة'; return false; }
     let snapshot = state;
     try { lastValidOptions = C.normalizeOptions(state.options); } catch { snapshot = { ...state, options: lastValidOptions }; }
     const result = storage.save(snapshot); $('saveStatus').classList.toggle('failed', !result.ok); $('saveStatus').lastElementChild.textContent = result.ok ? snapshot === state ? 'محفوظ على الجهاز' : 'المكتبة محفوظة · راجع المرشحات' : 'لم يُحفظ · نزّل نسخة';
-    if (!result.ok) warn(result.warning); return result.ok;
+    if (result.warning) warn(result.warning); return result.ok;
   }
   function scheduleSave() { clearTimeout(saveTimer); $('saveStatus').lastElementChild.textContent = writeBlocked ? 'الحفظ متوقف' : 'جارٍ الحفظ…'; saveTimer = setTimeout(saveNow, 450); }
   function changed(message) { renderLibrary(); renderChoices(); renderOverview(); renderPlan(); scheduleSave(); if (message) toast(message); }
@@ -28,7 +28,13 @@
   function confirmAction(title, text, action, details = '') { $('confirmTitle').textContent = title; $('confirmText').textContent = text; $('restoreDetails').textContent = details; $('restoreDetails').hidden = !details; pendingConfirm = action; showDialog('confirmDialog'); }
   function download(data, filename) { const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }), url = URL.createObjectURL(blob), a = node('a'); a.href = url; a.download = filename; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 15000); }
   const dateStamp = () => new Date().toISOString().slice(0, 10);
-  function exportBackup() { try { saveNow(); download(C.backupArchive(state), `research-hunter-web-backup-${dateStamp()}.json`); toast('أُعدّت نسخة Web كاملة للتنزيل.'); } catch (e) { toast(e.message); } }
+  function backupForDownload() {
+    let raw = null;
+    try { const stored = storage.raw(); raw = writeBlocked ? stored : stored.recovery ? { recovery: stored.recovery } : null; }
+    catch { if (writeBlocked) throw Error('تعذرت قراءة أصل البيانات؛ لم نستبدل المكتبة.'); }
+    return C.safetyBackup(state, lastValidOptions, raw);
+  }
+  function exportBackup() { try { saveNow(); download(backupForDownload(), `research-hunter-web-backup-${dateStamp()}.json`); toast('أُعدّت نسخة Web كاملة للتنزيل.'); } catch (e) { toast(e.message); } }
   function exportCategories() {
     try { const archive = C.categoryArchive(state.categories, state.exportSelected); download(archive, 'research-hunter-categories.json'); toast(`أُعدّ ${archive.categories.length} تصنيفًا بعباراته الفعّالة للإضافة. استخدم تصدير Web لحفظ المراجعات والقوالب.`); }
     catch (e) { toast(e.message); if (!state.exportSelected.length) { location.hash = 'library'; route(); $('selectAllForExport').focus(); } }
@@ -36,7 +42,7 @@
   async function copy(text) {
     if (!text.trim()) return toast('لا يوجد نص لنسخه بعد.');
     try { await navigator.clipboard.writeText(text); toast('تم نسخ النص.'); }
-    catch { const t = node('textarea'); t.value = text; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.append(t); t.select(); let ok = false; try { ok = document.execCommand('copy'); } catch {} t.remove(); toast(ok ? 'تم نسخ النص.' : 'تعذر النسخ التلقائي. حدّد النص وانسخه يدويًا.'); }
+    catch { const t = node('textarea', 'clipboard-fallback'); t.value = text; document.body.append(t); t.select(); let ok = false; try { ok = document.execCommand('copy'); } catch {} t.remove(); toast(ok ? 'تم نسخ النص.' : 'تعذر النسخ التلقائي. حدّد النص وانسخه يدويًا.'); }
   }
   function route() {
     const view = ['search', 'library', 'generator', 'backup'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'search';
@@ -65,16 +71,20 @@
   function syncSearchFields() { for (const [field, name] of Object.entries(searchFields)) { if ($(field).type === 'checkbox') $(field).checked = state.options[name]; else $(field).value = Array.isArray(state.options[name]) ? state.options[name].join(', ') : state.options[name]; } $('extraTerms').value = state.extra; }
   function planned() { const collected = C.collectTerms(state.categories, state.selected, state.extra); return { ...C.buildPlan(collected.terms, state.options), duplicates: collected.duplicates }; }
   function renderPlan() {
-    try { const plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
+    clearTimeout(planTimer); let plan = null;
+    try { plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
     catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
-    $('startSearch').querySelector('span').textContent = state.session ? 'تجهيز جولات جديدة' : 'تجهيز جولات البحث'; renderSession(); researchUI?.refresh();
+    $('startSearch').querySelector('span').textContent = state.session ? 'تجهيز جولات جديدة' : 'تجهيز جولات البحث'; renderSession(); researchUI?.refresh(plan);
   }
+  function schedulePlan() { clearTimeout(planTimer); planTimer = setTimeout(renderPlan, 200); }
+  function savedPlan() { if (sessionPlanSource !== state.session) { sessionPlan = state.session ? C.buildPlan(state.session.terms, state.session.options) : null; sessionPlanSource = state.session; } return sessionPlan; }
   function renderSession() {
     const session = state.session; $('activeSession').hidden = !session;
     $('sessionCaption').textContent = session ? 'جولتك محفوظة؛ تابع من حيث توقفت' : 'جاهز للاكتشاف؟';
-    if (!session) return;
-    const plan = C.buildPlan(session.terms, session.options);
+    if (!session) { renderedSession = null; renderedIndex = -1; return; }
+    const plan = savedPlan();
     $('roundTable').classList.toggle('show-terms', $('showRoundTerms').checked);
+    if (renderedSession === session) { if (renderedIndex !== session.index) renderSessionPosition(plan); return; }
     const rows = $('roundRows'); rows.replaceChildren();
     for (const [index, batch] of plan.batches.entries()) {
       const row = node('tr'), number = node('th'), content = node('td', 'round-content'), action = node('td');
@@ -86,10 +96,11 @@
       link.addEventListener('auxclick', event => { if (event.button === 1) selectBatch(index); });
       action.append(link); row.append(number, content, action); rows.append(row);
     }
-    renderSessionPosition(plan);
+    renderedSession = session; renderSessionPosition(plan);
   }
   function renderSessionPosition(plan) {
     const session = state.session, batch = plan.batches[session.index];
+    renderedIndex = session.index;
     $('roundCount').textContent = `${session.index + 1} من ${plan.batches.length}`; $('roundProgress').max = plan.batches.length; $('roundProgress').value = session.index + 1;
     $('previousBatch').disabled = session.index === 0; $('nextBatch').disabled = session.index === plan.batches.length - 1;
     $('batchTerms').replaceChildren(...batch.terms.map(t => { const e = node('bdi', 'term-chip', t); return e; })); $('queryPreview').value = batch.query;
@@ -102,7 +113,7 @@
   }
   function selectBatch(index) {
     if (!state.session) return;
-    const plan = C.buildPlan(state.session.terms, state.session.options); if (index < 0 || index >= plan.batches.length) return;
+    const plan = savedPlan(); if (index < 0 || index >= plan.batches.length) return;
     state.session.index = index; renderSessionPosition(plan); saveNow();
   }
   function startSearch() { try { const plan = planned(); if (!plan.batches.length) return toast('اختر تصنيفًا أو أضف عبارات للبحث.'); state.session = { terms: plan.terms, options: plan.options, index: 0, startedAt: new Date().toISOString() }; renderPlan(); saveNow(); toast('الجولات جاهزة في الجدول. افتح أي جولة، أو استخدم Ctrl مع النقر لفتحها في الخلفية.'); } catch (e) { toast(e.message); } }
@@ -208,19 +219,18 @@
       if (file.size > C.MAX_FILE_BYTES) throw Error('حجم النسخة أكبر من 8 ميغابايت.'); const archive = C.parseArchive(await file.text());
       if (archive.format !== 'research-hunter-web-backup') throw Error('هذا ملف تصنيفات. استخدم استيراد ودمج لإضافته، أو اختر نسخة Web كاملة.');
       confirmAction('استعادة نسخة Web كاملة', 'ستستبدل الاستعادة المكتبة والمسودة وإعدادات البحث الحالية. سنجهّز نسخة من حالتك الحالية للتنزيل قبل الاستبدال.', () => {
-        download(C.backupArchive(state), `research-hunter-web-before-restore-${dateStamp()}.json`);
-        if (writeBlocked) try { download(storage.raw(), 'research-hunter-web-damaged-storage.json'); } catch {}
-        state = C.clone(archive.state); writeBlocked = false; warn(''); syncSearchFields(); syncDraft(); changed('استُعيدت النسخة الكاملة.'); saveNow();
+        download(backupForDownload(), `research-hunter-web-before-restore-${dateStamp()}.json`);
+        state = C.clone(archive.state); lastValidOptions = C.normalizeOptions(state.options); writeBlocked = false; warn(''); syncSearchFields(); syncDraft(); changed('استُعيدت النسخة الكاملة.'); saveNow();
       }, `${archive.categories.length} تصنيفًا · ${archive.state.session ? 'تتضمن جولة بحث محفوظة' : 'لا توجد جولة بحث'} · ${archive.state.draft.topic || 'مسودة فارغة'}`);
     } catch (error) { toast(error.message); }
   });
   for (const button of document.querySelectorAll('[data-close]')) button.addEventListener('click', () => closeDialog(button.dataset.close));
   for (const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('close', () => { if (!document.querySelector('dialog[open]')) document.body.classList.remove('dialog-open'); });
-  $('confirmAction').addEventListener('click', () => { const action = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); if (action) action(); });
+  $('confirmAction').addEventListener('click', () => { const action = pendingConfirm; pendingConfirm = null; closeDialog('confirmDialog'); try { if (action) action(); } catch (error) { toast(error.message || 'تعذر إتمام العملية. لم نتابع الاستبدال.'); } });
   for (const [field, name] of Object.entries(searchFields)) $(field).addEventListener('change', () => { state.options[name] = $(field).type === 'checkbox' ? $(field).checked : name === 'batchSize' ? Number($(field).value) : $(field).value; renderPlan(); scheduleSave(); });
   // Text filters update without waiting for blur.
-  for (const field of ['account', 'searchExclude', 'requiredTerms']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; renderPlan(); scheduleSave(); });
-  $('extraTerms').addEventListener('input', () => { state.extra = $('extraTerms').value; renderPlan(); scheduleSave(); });
+  for (const field of ['account', 'searchExclude', 'requiredTerms']) $(field).addEventListener('input', () => { state.options[searchFields[field]] = $(field).value; schedulePlan(); scheduleSave(); });
+  $('extraTerms').addEventListener('input', () => { state.extra = $('extraTerms').value; schedulePlan(); scheduleSave(); });
   $('categoryFilter').addEventListener('input', renderChoices); $('libraryFilter').addEventListener('input', renderLibrary);
   $('selectVisible').addEventListener('click', () => { state.selected = [...new Set([...state.selected, ...filteredCategories($('categoryFilter').value).map(c => c.id)])]; changed(); });
   $('clearSelection').addEventListener('click', () => { state.selected = []; changed(); });

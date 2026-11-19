@@ -16,7 +16,7 @@
   const id = () => 'custom-' + (globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
   const clone = value => JSON.parse(JSON.stringify(value));
   function parseTerms(value) {
-    return unique(String(value).replace(/\\(?=[#,،])/g, '').split(/[,،;؛\n\r]+/u).map(t => t.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s*)/u, '').trim().replace(/^["“”`]+|["“”`]+$/gu, '').trim()).filter(Boolean));
+    return unique(String(value).replace(/\\(?=[#,،])/g, '').split(/[,،;؛\n\r]+/u).map(t => t.replace(/^\s*(?:[-•*]\s+|\d+[.)]\s+)/u, '').trim().replace(/^["“”`]+|["“”`]+$/gu, '').trim()).filter(Boolean));
   }
   const validHashtag = t => /^#(?=[\p{L}\p{N}_]*\p{L})[\p{L}\p{N}_]+$/u.test(t);
   function validDate(value) {
@@ -216,6 +216,7 @@
     return validHashtag(text) ? text : '"' + text + '"';
   };
   function normalizeOptions(options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) throw Error('إعدادات البحث يجب أن تكون كائنًا صالحًا.');
     if (options.accounts == null && options.account && (typeof options.account !== 'string' || !/^@?[a-zA-Z0-9_]{1,15}$/.test(options.account))) throw Error('اسم حساب X غير صالح. استخدم حقل الحسابات لإضافة عدة أسماء.');
     const accounts = parseAccounts(options.accounts ?? options.account ?? '');
     const result = { batchSize: Number(options.batchSize ?? 8), language: options.language || 'all', type: options.type || 'latest', since: options.since || '', until: options.until || '', accounts, account: accounts.length === 1 ? accounts[0] : '', exclude: options.exclude || '', required: options.required || '', match: options.match || 'exact', noReplies: !!options.noReplies, noReposts: !!options.noReposts };
@@ -253,7 +254,8 @@
   }
   const defaultDraft = () => ({ topic: '', context: '', scope: '', timeframe: '', exclude: '', language: 'both', mode: 'both', target: 'both', precision: 'high', count: '20', prompt: '', reply: '', evidence: [], accounts: [], exclusions: [], selectedAccounts: [], useExclusions: false, groups: Object.fromEntries(SECTIONS.map(s => [s.key, { title: '', description: '', terms: '', include: true }])) });
   function validateDraft(d) {
-    const base = defaultDraft(); if (!d || typeof d !== 'object') return base;
+    const base = defaultDraft(); if (d == null) return base;
+    if (typeof d !== 'object' || Array.isArray(d)) throw Error('مسودة المولّد غير صالحة.');
     for (const name of ['topic', 'context', 'scope', 'timeframe', 'exclude', 'language', 'mode', 'target', 'precision', 'count', 'prompt', 'reply']) if (typeof d[name] === 'string') base[name] = d[name].slice(0, name === 'reply' ? 150000 : name === 'prompt' ? 20000 : 10000);
     for (const s of SECTIONS) if (d.groups?.[s.key]) { const g = d.groups[s.key]; base.groups[s.key] = { title: typeof g.title === 'string' ? g.title.slice(0, 65) : '', description: typeof g.description === 'string' ? g.description.slice(0, 120) : '', terms: typeof g.terms === 'string' ? g.terms.slice(0, 150000) : '', include: g.include !== false }; }
     const terms = SECTIONS.flatMap(s => parseTerms(base.groups[s.key].terms));
@@ -264,21 +266,50 @@
     base.useExclusions = !!d.useExclusions;
     return base;
   }
+  function validateSession(value) {
+    if (value == null) return null;
+    if (typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.terms) || value.terms.length > 100000 || value.terms.some(t => typeof t !== 'string' || t.length > 500)) throw Error('جولة البحث المحفوظة غير صالحة.');
+    const plan = buildPlan(value.terms, value.options);
+    if (!Number.isInteger(value.index) || value.index < 0 || value.index >= plan.batches.length) throw Error('موضع الجولة المحفوظة غير صالح.');
+    return { terms: plan.terms, options: plan.options, index: value.index, startedAt: typeof value.startedAt === 'string' ? value.startedAt : '' };
+  }
+  function validateSamples(value) {
+    if (value != null && (!Array.isArray(value) || value.length > 100)) throw Error('سجل مراجعات النتائج يجب ألا يتجاوز 100 عينة.');
+    return Array.isArray(value) ? value.map(validateSample) : [];
+  }
   function validateState(state) {
     if (!state || typeof state !== 'object' || state.version !== 1) throw Error('نسخة بيانات Web غير مدعومة.');
     const categories = validateCategories(state.categories, true), ids = new Set(categories.map(c => c.id));
     const selected = Array.isArray(state.selected) ? [...new Set(state.selected.filter(x => ids.has(x)))] : [];
     const exportSelected = Array.isArray(state.exportSelected) ? [...new Set(state.exportSelected.filter(x => ids.has(x)))] : [];
-    const options = normalizeOptions(state.options); let session = null;
-    if (state.session) {
-      if (!Array.isArray(state.session.terms) || state.session.terms.length > 100000 || state.session.terms.some(t => typeof t !== 'string' || t.length > 500)) throw Error('جولة البحث المحفوظة غير صالحة.');
-      const plan = buildPlan(state.session.terms, state.session.options);
-      if (!Number.isInteger(state.session.index) || state.session.index < 0 || state.session.index >= plan.batches.length) throw Error('موضع الجولة المحفوظة غير صالح.');
-      session = { terms: plan.terms, options: plan.options, index: state.session.index, startedAt: typeof state.session.startedAt === 'string' ? state.session.startedAt : '' };
-    }
-    if (state.samples != null && (!Array.isArray(state.samples) || state.samples.length > 100)) throw Error('سجل مراجعات النتائج يجب ألا يتجاوز 100 عينة.');
-    const samples = Array.isArray(state.samples) ? state.samples.map(validateSample) : [];
+    const options = normalizeOptions(state.options), session = validateSession(state.session), samples = validateSamples(state.samples);
     return { version: 1, categories, selected, exportSelected, options, extra: typeof state.extra === 'string' ? state.extra.slice(0, 150000) : '', draft: validateDraft(state.draft), session, samples };
+  }
+  // Only local reads use this repair path. Imports and normal saves stay strict.
+  function repairStoredState(raw) {
+    if (!raw || typeof raw !== 'object' || raw.version !== 1) throw Error('نسخة بيانات Web غير مدعومة.');
+    validateCategories(raw.categories, true);
+    const repaired = { ...raw }, repairs = [];
+    const component = (field, label, validate, fallback) => { try { repaired[field] = validate(raw[field]); } catch { repaired[field] = fallback(); repairs.push(label); } };
+    component('options', 'مرشحات البحث', normalizeOptions, () => normalizeOptions());
+    component('session', 'الجولة المحفوظة', validateSession, () => null);
+    try { repaired.draft = validateDraft(raw.draft); }
+    catch {
+      const d = raw.draft && typeof raw.draft === 'object' && !Array.isArray(raw.draft) ? raw.draft : {};
+      const draft = validateDraft({ ...d, evidence: [], accounts: [], selectedAccounts: [] });
+      const terms = SECTIONS.flatMap(s => parseTerms(draft.groups[s.key].terms));
+      try { draft.evidence = normalizeReviews(d.evidence, terms); } catch { repairs.push('شواهد المسودة'); }
+      try { draft.accounts = normalizeAccountSources(d.accounts); } catch { repairs.push('حسابات المسودة'); }
+      draft.selectedAccounts = Array.isArray(d.selectedAccounts) ? unique(d.selectedAccounts.filter(h => draft.accounts.some(a => a.handle === h))).slice(0, 10) : [];
+      repaired.draft = draft;
+      if (!repairs.some(label => label.includes('المسودة'))) repairs.push('مسودة المولّد');
+    }
+    if (Array.isArray(raw.samples) && raw.samples.length <= 100) {
+      repaired.samples = []; let invalid = 0;
+      for (const sample of raw.samples) try { repaired.samples.push(validateSample(sample)); } catch { invalid++; }
+      if (invalid) repairs.push(`${invalid} من سجلات العينات`);
+    } else component('samples', 'سجل العينات', validateSamples, () => []);
+    return { state: validateState(repaired), repairs };
   }
   function categoryArchive(categories, selectedIds) {
     const wanted = selectedIds === undefined ? null : new Set(selectedIds);
@@ -292,6 +323,15 @@
     return { format: 'research-hunter-categories', version: 2, exportedAt: new Date().toISOString(), categories: valid };
   }
   function backupArchive(state) { const valid = validateState(state), { categories, ...settings } = valid; return { format: 'research-hunter-web-backup', version: 1, exportedAt: new Date().toISOString(), categories, state: settings }; }
+  function safetyBackup(state, fallbackOptions, rawStorage = null) {
+    const recoveryData = {}; let options;
+    try { options = normalizeOptions(state.options); }
+    catch { options = normalizeOptions(fallbackOptions); recoveryData.pendingOptions = clone(state.options); }
+    const archive = backupArchive({ ...state, options });
+    if (rawStorage) recoveryData.rawStorage = clone(rawStorage);
+    if (Object.keys(recoveryData).length) archive.recoveryData = recoveryData;
+    return archive;
+  }
   function webLibraryArchive(categories, selectedIds) {
     const chosen = categories.filter(c => selectedIds.includes(c.id));
     if (!chosen.length) throw Error('حدّد بعض التصنيفات أو الكل لتصدير المكتبة.');
@@ -317,20 +357,42 @@
       try { primary = this.storage.getItem(this.name); backup = this.storage.getItem(this.name + '.previous'); }
       catch { return { state: null, warning: 'التخزين المحلي غير متاح. ستبقى التغييرات لهذه الجلسة؛ نزّل نسخة احتياطية.' }; }
       if (!primary && !backup) return { state: null, warning: '' };
-      for (const [text, recovered] of [[primary, false], [backup, true]]) if (text) try { return { state: validateState(JSON.parse(text)), recovered, warning: recovered ? 'استُعيدت آخر نسخة سليمة بعد تعذر قراءة النسخة الحالية. نزّل نسخة احتياطية.' : '' }; } catch { /* Try the previous valid snapshot without overwriting damaged input. */ }
+      for (const [text, recovered] of [[primary, false], [backup, true]]) if (text) try {
+        const raw = JSON.parse(text); let candidate;
+        try { candidate = { state: validateState(raw), repairs: [] }; } catch { candidate = repairStoredState(raw); }
+        const originals = [];
+        if (recovered && primary) originals.push(primary);
+        if (candidate.repairs.length) originals.push(text);
+        const protectedOriginals = this.protectOriginals(originals);
+        const warning = [recovered ? 'استُعيدت اللقطة السابقة السليمة.' : '', candidate.repairs.length ? 'احتُفظ بالمكتبة وأُصلح الجزء غير الصالح: ' + candidate.repairs.join('، ') + '.' : '', originals.length ? protectedOriginals ? 'حُفظ أصل البيانات في سجل الاستعادة؛ يتضمنه تنزيل البيانات الخام.' : 'تعذر حفظ أصل البيانات بأمان؛ الحفظ متوقف. نزّل نسخة كاملة والبيانات الخام قبل الاستعادة.' : ''].filter(Boolean).join(' ');
+        return { ...candidate, recovered, blocked: !protectedOriginals, warning };
+      } catch { /* A damaged library never gets partially accepted. Try the previous snapshot. */ }
       return { state: null, blocked: true, warning: 'تعذرت قراءة البيانات المحفوظة. لن نستبدلها تلقائيًا. نزّل البيانات الخام للاستعادة أو استورد نسخة سليمة.' };
+    }
+    protectOriginals(originals) {
+      if (!originals.length) return true;
+      try {
+        const existing = this.storage.getItem(this.name + '.recovery'), records = existing ? JSON.parse(existing) : [];
+        if (!Array.isArray(records) || records.some(r => !r || typeof r.raw !== 'string')) return false;
+        let changed = false;
+        for (const raw of new Set(originals)) if (!records.some(r => r.raw === raw)) { records.push({ recordedAt: new Date().toISOString(), raw }); changed = true; }
+        if (changed) this.storage.setItem(this.name + '.recovery', JSON.stringify(records));
+        return true;
+      } catch { return false; }
     }
     save(state) {
       try {
         const serialized = JSON.stringify(validateState(state));
         const old = this.storage.getItem(this.name);
         if (old === serialized) return { ok: true };
-        if (old) try { validateState(JSON.parse(old)); this.storage.setItem(this.name + '.previous', old); } catch (e) { if (e?.name === 'QuotaExceededError') throw e; }
-        this.storage.setItem(this.name, serialized); return { ok: true };
+        let validOld = false; if (old) try { validateState(JSON.parse(old)); validOld = true; } catch { /* Never replace a valid snapshot with damaged input. */ }
+        this.storage.setItem(this.name, serialized);
+        if (validOld) try { this.storage.setItem(this.name + '.previous', old); } catch { return { ok: true, warning: 'حُفظت المكتبة الحالية، لكن تعذر تحديث اللقطة السابقة. نزّل نسخة احتياطية؛ لم تُحذف اللقطة القديمة.' }; }
+        return { ok: true };
       } catch { return { ok: false, warning: 'تعذر حفظ التغييرات على هذا الجهاز. نزّل نسخة احتياطية قبل إغلاق الصفحة.' }; }
     }
     previous() { const value = this.storage.getItem(this.name + '.previous'); if (!value) throw Error('لا توجد نسخة محلية سابقة بعد.'); return validateState(JSON.parse(value)); }
-    raw() { return { current: this.storage.getItem(this.name), previous: this.storage.getItem(this.name + '.previous') }; }
+    raw() { return { current: this.storage.getItem(this.name), previous: this.storage.getItem(this.name + '.previous'), recovery: this.storage.getItem(this.name + '.recovery') }; }
   }
   function openSearchTab(open, url) {
     if (typeof url !== 'string' || !url.startsWith('https://x.com/search?')) throw Error('رابط البحث غير صالح.');
@@ -346,5 +408,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, validateSample, csvCell, planCSV, StorageManager, XTab };
+  return { LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, defaultDraft, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, csvCell, planCSV, StorageManager, XTab };
 });

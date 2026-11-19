@@ -143,14 +143,14 @@
       if (d.exclusions.length) { const label = node('label', 'suggested-exclusions'), check = node('input'); check.type = 'checkbox'; check.checked = d.useExclusions; check.addEventListener('change', () => { d.useExclusions = check.checked; scheduleSave(); }); label.append(check, node('span', '', 'استخدم الاستبعادات المقترحة: ' + d.exclusions.join('، '))); holder.append(label); }
       holder.append(node('p', 'micro-note', 'اختيار حساب هنا يضيفه لمرشح البحث، ولا يمنحه وصف «موثوق». عند الانتقال للبحث تبدأ بإعدادات جديدة مع الحسابات والاستبعادات التي اخترتها، وتُحفظ هذه الاختيارات في قوالب التصنيفات الجديدة.'));
     }
-    function refresh() {
+    function refresh(plan) {
       const state = getState(), current = $('savedPreset').value;
       const placeholder = node('option', '', 'اختر تصنيفًا له قالب محفوظ'); placeholder.value = '';
       $('savedPreset').replaceChildren(placeholder, ...state.categories.filter(c => c.preset).map(c => { const o = node('option', '', c.title); o.value = c.id; return o; })); $('savedPreset').value = current;
       $('saveCurrentPreset').disabled = state.selected.length !== 1; $('loadPreset').disabled = !state.categories.some(c => c.preset);
       const chosen = state.categories.filter(c => state.selected.includes(c.id)), excluded = chosen.reduce((sum, c) => sum + c.terms.length - C.activeTerms(c).length, 0), alerts = chosen.flatMap(C.activeTerms).filter(t => C.inspectTerm(t).length).length;
       $('planReviewSummary').textContent = `${excluded} عبارة مستبعدة بمراجعتك${alerts ? ` · ${alerts} عبارة تستحق فحص الصياغة من المكتبة` : ''}`;
-      try { const p = planned(); csv.disabled = urls.disabled = !p.batches.length; } catch { csv.disabled = urls.disabled = true; }
+      csv.disabled = urls.disabled = !plan?.batches.length;
       sampleDetails.hidden = !state.session;
     }
     return { review, preset, refresh, renderDraftEvidence };
