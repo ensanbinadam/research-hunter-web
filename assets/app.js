@@ -388,11 +388,13 @@
     } catch (error) { $('saveSessionError').textContent = error.message; $('saveSessionError').hidden = false; }
   });
   async function stageIncomingFiles(fileList) {
+    if (importBusy) return toast('انتظر اكتمال قراءة الملفات الحالية، ثم أضف الملفات التالية.');
     const files = [...fileList]; if (!files.length) return;
     if (stagedFiles.length + files.length > 20) return toast('اختر حتى 20 ملفًا في عملية الدمج الواحدة.');
     importBusy = true; $('importFiles').disabled = true; updateImportPreview();
-    const incoming = await Promise.all(files.map(async file => { try { if (file.size > C.MAX_FILE_BYTES) throw Error('أكبر من 8 ميغابايت'); const archive = C.parseArchive(await file.text()); return { name: file.name, categories: archive.categories }; } catch (error) { return { name: file.name, error: error.message }; } }));
-    stagedFiles.push(...incoming); importBusy = false; $('importFiles').disabled = false; updateImportPreview();
+    try { stagedFiles.push(...await C.readCategoryFiles(files)); }
+    catch (error) { toast('تعذر قراءة الملفات: ' + error.message); }
+    finally { importBusy = false; $('importFiles').disabled = false; updateImportPreview(); }
   }
   $('importFiles').addEventListener('change', async e => { const files = [...e.target.files]; e.target.value = ''; await stageIncomingFiles(files); });
   const dropZone = $('importDropZone');
@@ -496,7 +498,8 @@
   });
   window.addEventListener('hashchange', () => { route(); window.scrollTo({ top: 0 }); }); window.addEventListener('pagehide', saveNow); document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
   window.addEventListener('storage', e => { if (e.key === storage.name || e.key === null) { writeBlocked = true; warn('تغيّرت المكتبة في تبويب آخر. أوقفنا الحفظ هنا لتجنّب الكتابة فوقها. نزّل نسختك الحالية، ثم أعد تحميل الصفحة.'); saveNow(); } });
-  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, getLastValidOptions: () => lastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route });
+  researchUI = window.HunterResearchUI({ C, $, node, getState: () => state, getLastValidOptions: () => lastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route, onReviewDirtyChange: dirty => window.HunterStartup?.setReviewDirty(dirty) });
   syncThemeButton(); syncSearchFields(); syncDraft(); renderOverview(); renderLibrary(); renderChoices(); renderPlan(); renderSavedSessionsBadge(); renderStorageUsage(); route();
   if (loaded.warning) warn(loaded.warning); if (loaded.blocked) saveNow(); else if (!loaded.state) saveNow();
+  window.HunterStartup?.ready();
 })();

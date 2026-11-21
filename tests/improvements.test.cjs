@@ -193,11 +193,11 @@ test('review dialog dirty guard protects unsaved notes across category switch, s
     ],
     selected: ['cat-a'], exportSelected: [], options: C.normalizeOptions(), extra: '', draft: C.defaultDraft(), session: null, samples: []
   };
-  let pendingConfirm = null, confirmCalls = 0, closedForce = null;
+  let pendingConfirm = null, confirmCalls = 0, closedForce = null, pageExitGuard = false;
   const ui = sandbox.window.HunterResearchUI({
     C, $: id => elements.get(id), node: (tag, cls, txt) => { const e = new El(tag); e.className = cls || ''; if (txt != null) e.textContent = String(txt); return e; },
     getState: () => state, getLastValidOptions: () => C.normalizeOptions(), changed() {}, scheduleSave() {}, toast() {},
-    showDialog() {}, closeDialog(id, force) { closedForce = [id, !!force]; },
+    showDialog() {}, closeDialog(id, force) { closedForce = [id, !!force]; }, onReviewDirtyChange(dirty) { pageExitGuard = dirty; },
     confirmAction(_title, _msg, action) { confirmCalls++; pendingConfirm = action; },
     xTab: { navigate: () => true }, download() {}, planned: () => ({ batches: [] }), syncSearchFields() {}, route() {}
   });
@@ -210,6 +210,7 @@ test('review dialog dirty guard protects unsaved notes across category switch, s
   note.value = 'ملاحظة مهمة لم تُحفظ';
   note.dispatch('input');
   assert.equal(badge.hidden, false);
+  assert.equal(pageExitGuard, true);
 
   // 1) Category switch while dirty MUST revert and ask confirmation
   elements.get('reviewCategory').value = 'cat-b';
@@ -217,6 +218,7 @@ test('review dialog dirty guard protects unsaved notes across category switch, s
   assert.equal(confirmCalls, 1);
   assert.equal(elements.get('reviewCategory').value, 'cat-a');
   assert.equal(note.value, 'ملاحظة مهمة لم تُحفظ');
+  assert.equal(pageExitGuard, true);
 
   // 2) Typing in search that STILL matches current term keeps note without popping dialog
   elements.get('reviewFind').value = 'بروم';
@@ -253,6 +255,7 @@ test('review dialog dirty guard protects unsaved notes across category switch, s
   pendingConfirm();
   assert.deepEqual(closedForce, ['reviewDialog', true]);
   assert.equal(badge.hidden, true);
+  assert.equal(pageExitGuard, false);
 
   // 7) Confirming a category switch applies the target category cleanly
   ui.review('cat-a');
@@ -264,4 +267,5 @@ test('review dialog dirty guard protects unsaved notes across category switch, s
   assert.equal(elements.get('reviewCategory').value, 'cat-b');
   assert.equal(note.value, '');
   assert.equal(badge.hidden, true);
+  assert.equal(pageExitGuard, false);
 });

@@ -122,6 +122,21 @@
     const categories = validateCategories(data.categories, web);
     return { format: data.format, categories, ...(data.format === 'research-hunter-web-backup' ? { state: validateState({ ...data.state, categories }) } : {}) };
   }
+  async function readCategoryFiles(fileList) {
+    const files = [...fileList];
+    if (files.length > 20) throw Error('اختر حتى 20 ملفًا في عملية الدمج الواحدة.');
+    const incoming = [];
+    for (const file of files) {
+      // Allow pending input and painting before processing the next local file.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      try {
+        if (file.size > MAX_FILE_BYTES) throw Error('أكبر من 8 ميغابايت');
+        const archive = parseArchive(await file.text());
+        incoming.push({ name: file.name, categories: archive.categories });
+      } catch (error) { incoming.push({ name: file.name, error: error.message }); }
+    }
+    return incoming;
+  }
   function mergeCategories(base, incoming, mode = 'merge') {
     const categories = clone(validateCategories(base, true)), targetIds = []; let merged = 0, duplicates = 0, renamed = 0;
     for (const raw of validateCategories(incoming, true)) {
@@ -557,5 +572,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  return { LIMIT, SAVED_SESSIONS_LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, bulkUpdateReviews, analyzeLibraryOverlap, validateCategory, validateCategories, parseArchive, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateSavedSession, validateSavedSessions, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, summarizeSamples, samplesSummaryCSV, csvCell, planCSV, StorageManager, XTab };
+  return { LIMIT, SAVED_SESSIONS_LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, bulkUpdateReviews, analyzeLibraryOverlap, validateCategory, validateCategories, parseArchive, readCategoryFiles, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateSavedSession, validateSavedSessions, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, summarizeSamples, samplesSummaryCSV, csvCell, planCSV, StorageManager, XTab };
 });

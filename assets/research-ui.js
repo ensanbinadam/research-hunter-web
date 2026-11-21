@@ -1,7 +1,8 @@
 (function () {
   'use strict';
   window.HunterResearchUI = function (hooks) {
-    const { C, $, node, getState, getLastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route } = hooks;
+    const { C, $, node, getState, getLastValidOptions, savedPlan, changed, scheduleSave, toast, showDialog, closeDialog, confirmAction, xTab, download, planned, syncSearchFields, route, onReviewDirtyChange = () => {} } = hooks;
+    let notifiedReviewDirty = false;
     let presetId = null, savedReviewSnapshot = null, activeCategoryId = '', activeTermKey = '', activeFilter = 'all', activeFind = '';
     const today = () => { const d = new Date(); return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-'); };
     const button = (text, action, className = 'button ghost small') => { const b = node('button', className, text); b.type = 'button'; b.addEventListener('click', action); return b; };
@@ -23,7 +24,11 @@
       if (!savedReviewSnapshot) return false;
       return $('reviewStatus').value !== savedReviewSnapshot.status || $('reviewDate').value !== savedReviewSnapshot.checkedAt || $('reviewSource').value.trim() !== savedReviewSnapshot.sourceUrl || $('reviewNote').value !== savedReviewSnapshot.note;
     }
-    function updateReviewDirty() { $('reviewDirtyBadge').hidden = !isReviewDirty(); }
+    function updateReviewDirty() {
+      const dirty = isReviewDirty();
+      $('reviewDirtyBadge').hidden = !dirty;
+      if (dirty !== notifiedReviewDirty) { notifiedReviewDirty = dirty; onReviewDirtyChange(dirty); }
+    }
     function guardDirty(proceed, revert = null, message = 'لديك تعديلات غير محفوظة لهذا المصطلح. هل تريد تجاهلها والانتقال؟') {
       if (!isReviewDirty()) return proceed();
       if (revert) revert();
