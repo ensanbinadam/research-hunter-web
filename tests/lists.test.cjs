@@ -74,3 +74,25 @@ test('changing result tab marks session stale and exports exact list links', () 
   for (const b of plan.batches) assert.ok(csv.includes(b.url));
   assert.ok(!csv.includes('from%3A')); assert.ok(!csv.includes('since%3A'));
 });
+
+test('retired list preferences become latest when edited without mutating saved archive or preset', () => {
+  const original = options(), before = JSON.stringify(original);
+  const editable = C.editableOptions(original);
+  assert.equal(editable.type, 'latest');
+  assert.deepEqual(editable, { ...original, type: 'latest' });
+  assert.equal(JSON.stringify(original), before);
+  const plan = C.buildPlan(terms, editable);
+  assert.equal(new URL(plan.batches[0].url).searchParams.get('f'), 'live');
+  assert.ok(plan.batches[0].query.includes('from:math_demo'));
+  assert.equal(C.validateSavedSession({ ...session(), id:'old-list', name:'أرشيف القوائم' }).options.type, 'lists');
+});
+
+test('editable result tabs retain supported preferences and reject malformed retired filters', () => {
+  for (const type of ['latest','top','users','media']) {
+    const original = C.normalizeOptions({ ...options(), type });
+    assert.deepEqual(C.editableOptions(original), original);
+  }
+  assert.throws(() => C.editableOptions({ type:'lists', accounts:'bad OR name' }), /حساب/);
+  assert.throws(() => C.editableOptions({ type:'unknown' }), /إعدادات/);
+  assert.throws(() => C.editableOptions(null), /كائن/);
+});

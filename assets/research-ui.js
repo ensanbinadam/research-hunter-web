@@ -185,7 +185,7 @@
       ['language', 'لغة النتائج', [['all', 'كل اللغات'], ['ar', 'العربية'], ['en', 'الإنجليزية']]],
       ['since', 'من تاريخ', 'date'], ['until', 'إلى تاريخ (غير مشمول)', 'date'],
       ['match', 'مطابقة العبارة', [['exact', 'عبارة دقيقة بالترتيب'], ['words', 'كل كلمات العبارة بأي ترتيب']]],
-      ['type', 'عرض النتائج', [['latest', 'الأحدث'], ['top', 'الأبرز'], ['users', 'الحسابات'], ['media', 'الوسائط'], ['lists', 'القوائم']]],
+      ['type', 'عرض النتائج', [['latest', 'الأحدث'], ['top', 'الأبرز'], ['users', 'الحسابات'], ['media', 'الوسائط']]],
       ['batchSize', 'عبارات في الدفعة', [['4', '4'], ['8', '8'], ['12', '12'], ['20', '20']]],
       ['noReplies', 'استبعاد الردود', 'checkbox'], ['noReposts', 'استبعاد إعادة النشر', 'checkbox']
     ];
@@ -197,25 +197,17 @@
       if (name === 'accounts') input.dir = 'ltr'; if (name === 'required') input.maxLength = 500;
       if (type === 'checkbox') field.classList.add('preset-check'); field.append(caption, input); $('presetFields').append(field);
     }
-    const presetListsHint = node('p', 'micro-note', 'بحث القوائم يفتح جولة مستقلة لكل عبارة. تبقى مرشحات المنشورات محفوظة ولا تُطبّق في هذا الوضع.');
-    presetListsHint.hidden = true; $('presetFields').after(presetListsHint);
-    function syncPresetMode() {
-      const listsMode = $('preset_type').value === 'lists';
-      for (const [name] of presetSchema) if (name !== 'type') $('preset_' + name).disabled = listsMode;
-      presetListsHint.hidden = !listsMode;
-    }
-    $('preset_type').addEventListener('change', syncPresetMode);
     function preset(id) {
       const c = getState().categories.find(c => c.id === id); if (!c) return; presetId = id;
       let options;
-      try { options = C.normalizeOptions(c.preset || getState().options); }
-      catch { options = C.normalizeOptions(getLastValidOptions ? getLastValidOptions() : undefined); }
+      try { options = C.editableOptions(c.preset || getState().options); }
+      catch { options = C.editableOptions(getLastValidOptions ? getLastValidOptions() : undefined); }
       $('presetCategoryName').textContent = c.title; $('presetError').hidden = true;
       for (const [name, , type] of presetSchema) { const el = $('preset_' + name); if (type === 'checkbox') el.checked = options[name]; else el.value = name === 'accounts' ? options.accounts.join(', ') : options[name]; }
-      syncPresetMode(); $('removePreset').disabled = !c.preset; showDialog('presetDialog');
+      $('removePreset').disabled = !c.preset; showDialog('presetDialog');
     }
     function applyPreset(c) {
-      const state = getState(); state.options = C.normalizeOptions(c.preset); state.selected = [c.id]; syncSearchFields(); changed('حُمّل قالب «' + c.title + '». راجع العبارات الإضافية قبل البدء.'); location.hash = 'search'; route();
+      const state = getState(); state.options = C.editableOptions(c.preset); state.selected = [c.id]; syncSearchFields(); changed('حُمّل قالب «' + c.title + '». راجع العبارات الإضافية قبل البدء.'); location.hash = 'search'; route();
     }
     function savePreset(use) {
       try {

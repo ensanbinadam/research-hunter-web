@@ -275,6 +275,13 @@
     if (typeof result.required !== 'string' || result.required.length > 500 || !['exact', 'words'].includes(result.match)) throw Error('إعدادات مطابقة العبارات أو الكلمات المطلوبة غير صالحة.');
     return result;
   }
+  // Retain retired list data for faithful archive/session round-trips, while the
+  // editable search form and applied presets always use a supported result tab.
+  function editableOptions(options) {
+    const result = normalizeOptions(options);
+    if (result.type === 'lists') result.type = 'latest';
+    return result;
+  }
   function searchUrl(query, type = 'latest') {
     const params = new URLSearchParams({ q: query, src: 'typed_query' });
     if (type !== 'top') params.set('f', { latest: 'live', users: 'user', media: 'media', lists: 'list' }[type]);
@@ -584,5 +591,5 @@
     constructor(open) { this.open = open; }
     navigate(url) { return openSearchTab(this.open, url); }
   }
-  return { LIMIT, SAVED_SESSIONS_LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, bulkUpdateReviews, analyzeLibraryOverlap, validateCategory, validateCategories, parseArchive, readCategoryFiles, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateSavedSession, validateSavedSessions, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, summarizeSamples, samplesSummaryCSV, csvCell, planCSV, StorageManager, XTab };
+  return { LIMIT, SAVED_SESSIONS_LIMIT, MAX_FILE_BYTES, SECTIONS, key, unique, id, clone, parseTerms, parseEditedTerms, validHashtag, validDate, sourceUrl, parseAccounts, normalizeAccountSources, normalizeReviews, activeTerms, inspectTerm, qualityReport, bulkUpdateReviews, analyzeLibraryOverlap, validateCategory, validateCategories, parseArchive, readCategoryFiles, mergeCategories, parseResponse, makePrompt, collectTerms, literal, normalizeOptions, editableOptions, searchUrl, buildPlan, countActiveFilters, isSessionStale, defaultDraft, validateSavedSession, validateSavedSessions, validateState, categoryArchive, webLibraryArchive, backupArchive, safetyBackup, validateSample, summarizeSamples, samplesSummaryCSV, csvCell, planCSV, StorageManager, XTab };
 });
