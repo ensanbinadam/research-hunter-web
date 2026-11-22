@@ -268,7 +268,7 @@
     const accounts = parseAccounts(options.accounts ?? options.account ?? '');
     const result = { batchSize: Number(options.batchSize ?? 8), language: options.language || 'all', type: options.type || 'latest', since: options.since || '', until: options.until || '', accounts, account: accounts.length === 1 ? accounts[0] : '', exclude: options.exclude || '', required: options.required || '', match: options.match || 'exact', noReplies: !!options.noReplies, noReposts: !!options.noReposts };
     if (!Number.isInteger(result.batchSize) || result.batchSize < 1 || result.batchSize > 20) throw Error('عدد عبارات الدفعة يجب أن يكون من 1 إلى 20.');
-    if (!['all', 'ar', 'en'].includes(result.language) || !['latest', 'top', 'users', 'media'].includes(result.type)) throw Error('إعدادات البحث غير صالحة.');
+    if (!['all', 'ar', 'en'].includes(result.language) || !['latest', 'top', 'users', 'media', 'lists'].includes(result.type)) throw Error('إعدادات البحث غير صالحة.');
     for (const name of ['since', 'until']) if (result[name] && (!/^\d{4}-\d{2}-\d{2}$/.test(result[name]) || !Number.isFinite(Date.parse(result[name])) || new Date(result[name]).toISOString().slice(0, 10) !== result[name])) throw Error('أدخل تاريخًا صحيحًا.');
     if (result.since && result.until && result.since >= result.until) throw Error('تاريخ النهاية يجب أن يأتي بعد تاريخ البداية؛ يوم النهاية غير مشمول.');
     if (typeof result.exclude !== 'string' || result.exclude.length > 1000) throw Error('قائمة الاستبعاد طويلة جدًا.');
@@ -277,11 +277,22 @@
   }
   function searchUrl(query, type = 'latest') {
     const params = new URLSearchParams({ q: query, src: 'typed_query' });
-    if (type !== 'top') params.set('f', { latest: 'live', users: 'user', media: 'media' }[type]);
+    if (type !== 'top') params.set('f', { latest: 'live', users: 'user', media: 'media', lists: 'list' }[type]);
     return 'https://x.com/search?' + params.toString();
   }
   function buildPlan(terms, rawOptions = {}) {
     const options = normalizeOptions(rawOptions);
+    if (options.type === 'lists') {
+      const listTerms = unique(terms);
+      const batches = listTerms.map(term => {
+        // Match X's native list discovery: one plain search phrase per round.
+        const query = cleanText(term), url = searchUrl(query, 'lists');
+        if (!query) throw Error('توجد عبارة فارغة بعد تنظيف علامات الاستعلام.');
+        if (query.length > 380 || url.length > 3500) throw Error('إحدى عبارات البحث عن القوائم أطول من حد الجولة. اختصرها؛ لم تُحذف أي عبارة.');
+        return { terms: [term], query, url };
+      });
+      return { options, terms: listTerms, batches };
+    }
     const accountQuery = options.accounts.map(h => 'from:' + h).join(' OR ');
     const suffix = [options.language !== 'all' ? 'lang:' + options.language : '', options.accounts.length > 1 ? '(' + accountQuery + ')' : accountQuery, options.since ? 'since:' + options.since : '', options.until ? 'until:' + options.until : '', options.noReplies ? '-filter:replies' : '', options.noReposts ? '-filter:retweets' : '', ...parseTerms(options.required).map(literal), ...parseTerms(options.exclude).map(t => '-' + literal(t))].filter(Boolean).join(' ');
     const phrase = term => {
@@ -305,6 +316,7 @@
     return { options, terms: unique(terms), batches: batches.map(batch => ({ terms: batch, query: makeQuery(batch), url: searchUrl(makeQuery(batch), options.type) })) };
   }
   function countActiveFilters(options = {}, extra = '') {
+    if (options.type === 'lists') return String(extra || '').trim() ? 1 : 0;
     let count = 0;
     const rawAccounts = Array.isArray(options.accounts) ? options.accounts.filter(Boolean).length : String(options.accounts ?? options.account ?? '').trim() ? 1 : 0;
     if (options.since) count++;
@@ -502,10 +514,10 @@
     return { format: 'research-hunter-web-library', version: 1, exportedAt: new Date().toISOString(), categories: validateCategories(chosen) };
   }
   function validateSample(sample) {
-    if (!sample || !Number.isInteger(sample.reviewed) || sample.reviewed < 1 || sample.reviewed > 10000 || !Number.isInteger(sample.relevant) || sample.relevant < 0 || sample.relevant > sample.reviewed) throw Error('أدخل عدد المنشورات التي راجعتها وعدد الملائم منها؛ الملائم لا يتجاوز العدد الكلي للعينة.');
+    if (!sample || !Number.isInteger(sample.reviewed) || sample.reviewed < 1 || sample.reviewed > 10000 || !Number.isInteger(sample.relevant) || sample.relevant < 0 || sample.relevant > sample.reviewed) throw Error('أدخل عدد النتائج التي راجعتها وعدد الملائم منها؛ الملائم لا يتجاوز العدد الكلي للعينة.');
     if (typeof sample.label !== 'string' || !sample.label.trim() || sample.label.length > 65 || typeof sample.query !== 'string' || sample.query.length > 2000) throw Error('اسم تجربة المراجعة أو الاستعلام غير صالح.');
     if (sample.recordedAt != null && (typeof sample.recordedAt !== 'string' || !Number.isFinite(Date.parse(sample.recordedAt)))) throw Error('تاريخ سجل المراجعة غير صالح.');
-    return { id: typeof sample.id === 'string' ? sample.id.slice(0, 90) : id(), label: sample.label.trim(), reviewed: sample.reviewed, relevant: sample.relevant, query: sample.query, type: ['top', 'latest', 'users', 'media'].includes(sample.type) ? sample.type : 'latest', recordedAt: sample.recordedAt ? new Date(sample.recordedAt).toISOString() : new Date().toISOString(), note: String(sample.note || '').slice(0, 1000) };
+    return { id: typeof sample.id === 'string' ? sample.id.slice(0, 90) : id(), label: sample.label.trim(), reviewed: sample.reviewed, relevant: sample.relevant, query: sample.query, type: ['top', 'latest', 'users', 'media', 'lists'].includes(sample.type) ? sample.type : 'latest', recordedAt: sample.recordedAt ? new Date(sample.recordedAt).toISOString() : new Date().toISOString(), note: String(sample.note || '').slice(0, 1000) };
   }
   function csvCell(value) {
     let text = String(value ?? ''); if (/^[\s]*[=+\-@]/u.test(text)) text = "'" + text;

@@ -96,6 +96,9 @@
   function planned() { const collected = C.collectTerms(state.categories, state.selected, state.extra); return { ...C.buildPlan(collected.terms, state.options), duplicates: collected.duplicates }; }
   function renderPlan() {
     clearTimeout(planTimer); let plan = null;
+    const listsMode = state.options.type === 'lists';
+    for (const [field, name] of Object.entries(searchFields)) if (name !== 'type') $(field).disabled = listsMode;
+    $('listsSearchHint').hidden = !listsMode;
     renderFilterIndicators();
     try { plan = planned(); $('planTerms').textContent = plan.terms.length; $('planBatches').textContent = plan.batches.length; $('planDuplicates').textContent = plan.duplicates; $('planError').hidden = true; $('startSearch').disabled = !plan.terms.length; }
     catch (e) { const terms = C.collectTerms(state.categories, state.selected, state.extra); $('planTerms').textContent = terms.terms.length; $('planDuplicates').textContent = terms.duplicates; $('planBatches').textContent = '—'; $('planError').textContent = e.message; $('planError').hidden = false; $('startSearch').disabled = true; }
@@ -104,6 +107,7 @@
   function schedulePlan() { clearTimeout(planTimer); renderFilterIndicators(); planTimer = setTimeout(renderPlan, 200); }
   function savedPlan() { if (sessionPlanSource !== state.session) { sessionPlan = state.session ? C.buildPlan(state.session.terms, state.session.options) : null; sessionPlanSource = state.session; } return sessionPlan; }
   function sessionOptionsSummary(opts) {
+    if (opts.type === 'lists') return 'بحث عن قوائم · عبارة واحدة لكل جولة';
     const parts = [];
     if (opts.language && opts.language !== 'all') parts.push('اللغة: ' + langLabel(opts.language));
     if (opts.accounts?.length) parts.push(`${opts.accounts.length} حساب`);
